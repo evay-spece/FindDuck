@@ -1,0 +1,4 @@
+https://github.com/oil-oil/oil-find
+Reference revision: 0c26e6f87c7006141d93eddc254b2975079c170d
+License: MIT; no Pro module.
+Vendored source SHA256 (including recorded adapter patches): e71448541dff0f84a23992dcb46acf39a24956413079b1bed90f5e67c204ba11
