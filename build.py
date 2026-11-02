@@ -2,7 +2,7 @@
 from pathlib import Path
 import os,sys,subprocess,plistlib,shutil,tempfile
 root=Path(__file__).resolve().parent
-app=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/'build/找鸭 1.1.6.app'
+app=Path(sys.argv[1]).resolve() if len(sys.argv)>1 else root/'build/找鸭 1.2.8.app'
 if app.exists():raise SystemExit(f'目标已存在：{app}')
 env=os.environ.copy();env['DEVELOPER_DIR']='/Applications/Xcode.app/Contents/Developer'
 subprocess.run(['xcrun','swift','build','-c','release','--product','SMBSearch','--package-path',str(root)],env=env,check=True)
@@ -10,7 +10,7 @@ binpath=Path(subprocess.check_output(['xcrun','swift','build','-c','release','--
 app.parent.mkdir(parents=True,exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='.findduck-oil-build-',dir=app.parent) as temp:
  stage=Path(temp)/app.name;(stage/'Contents/MacOS').mkdir(parents=True);(stage/'Contents/Resources').mkdir()
- info=plistlib.loads((root/'Info.plist').read_bytes());info.update(CFBundleShortVersionString='1.1.6',CFBundleVersion='44',CFBundleName='找鸭',CFBundleDisplayName='找鸭',LSMinimumSystemVersion='14.0')
+ info=plistlib.loads((root/'Info.plist').read_bytes());info.update(CFBundleShortVersionString='1.2.8',CFBundleVersion='53',CFBundleName='找鸭',CFBundleDisplayName='找鸭',LSMinimumSystemVersion='14.0')
  (stage/'Contents/Info.plist').write_bytes(plistlib.dumps(info))
  shutil.copy2(binpath,stage/'Contents/MacOS/SMBSearch')
  for f in (root/'Assets').iterdir():

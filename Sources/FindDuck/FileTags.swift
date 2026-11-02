@@ -42,14 +42,14 @@ struct FileTagEditor:View {
 }
 // A native menu view keeps all color choices directly visible, as in Finder.
 @MainActor final class TagColorPalette:NSView {
-    private var buttons:[NSButton]=[]
+    private var buttons:[ColorChoiceButton]=[]
     private let selected:()->Set<FileMarkColor>
     private let toggle:(FileMarkColor)->Void
     init(selected:@escaping ()->Set<FileMarkColor>,toggle:@escaping (FileMarkColor)->Void) {
         self.selected=selected;self.toggle=toggle;super.init(frame:NSRect(x:0,y:0,width:245,height:36))
         setAccessibilityElement(false)
         for (index,color) in FileMarkColor.allCases.enumerated() {
-            let button=TagHoverButton(frame:NSRect(x:10+index*32,y:4,width:27,height:28))
+            let button=ColorChoiceButton(frame:NSRect(x:10+index*32,y:4,width:27,height:28))
             button.isBordered=false;button.imagePosition = .imageOnly;button.bezelStyle = .regularSquare;button.tag=index
             button.target=self;button.action=#selector(pressed(_:));button.toolTip=color.rawValue
             button.setAccessibilityLabel(color.rawValue+"标签");addSubview(button);buttons.append(button)
@@ -62,12 +62,7 @@ struct FileTagEditor:View {
         let values=selected()
         for (index,button) in buttons.enumerated() {
             let color=FileMarkColor.allCases[index],chosen=values.contains(color)
-            button.image=NSImage(size:NSSize(width:21,height:21),flipped:false) {rect in
-                let circle=NSBezierPath(ovalIn:rect.insetBy(dx:2,dy:2)),native=NSColor(color.color)
-                native.withAlphaComponent(0.65).setFill();circle.fill();native.setStroke();circle.lineWidth=1.2;circle.stroke()
-                if chosen {let check="✓" as NSString;check.draw(at:NSPoint(x:4,y:2),withAttributes:[.font:NSFont.systemFont(ofSize:14,weight:.bold),.foregroundColor:NSColor.white])}
-                return true
-            }
+            button.markColor=color;button.chosen=chosen;button.needsDisplay=true
             button.setAccessibilityValue(chosen ? "已添加" : "未添加")
         }
     }
@@ -129,4 +124,20 @@ struct TagRegionKey:PreferenceKey {
     }
     override func mouseEntered(with event:NSEvent) {alphaValue=0.7}
     override func mouseExited(with event:NSEvent) {alphaValue=1}
+}
+
+@MainActor final class ColorChoiceButton:NSButton {
+    var markColor:FileMarkColor = .red
+    var chosen=false
+    private var hovering=false,area:NSTrackingArea?
+    override func updateTrackingAreas() {super.updateTrackingAreas();guard area == nil else {return};let next=NSTrackingArea(rect:.zero,options:[.mouseEnteredAndExited,.activeAlways,.inVisibleRect],owner:self,userInfo:nil);area=next;addTrackingArea(next)}
+    override func mouseEntered(with event:NSEvent) {hovering=true;needsDisplay=true}
+    override func mouseExited(with event:NSEvent) {hovering=false;needsDisplay=true}
+    override func draw(_ dirtyRect:NSRect) {
+        let diameter:CGFloat=hovering ? 25 : 18,rect=NSRect(x:(bounds.width-diameter)/2,y:(bounds.height-diameter)/2,width:diameter,height:diameter)
+        let path=NSBezierPath(ovalIn:rect),color=NSColor(markColor.color)
+        color.withAlphaComponent(0.72).setFill();path.fill();color.setStroke();path.lineWidth=1.1;path.stroke()
+        let symbol=hovering ? (chosen ? "−" : "+") : chosen ? "✓" : ""
+        if !symbol.isEmpty {let text=symbol as NSString,attrs:[NSAttributedString.Key:Any]=[.font:NSFont.systemFont(ofSize:hovering ? 17 : 11,weight:.semibold),.foregroundColor:NSColor.white];let size=text.size(withAttributes:attrs);text.draw(at:NSPoint(x:(bounds.width-size.width)/2,y:(bounds.height-size.height)/2),withAttributes:attrs)}
+    }
 }

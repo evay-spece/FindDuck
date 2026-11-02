@@ -17,6 +17,7 @@ struct SearchPanel: View {
     @ObservedObject var model: SearchLibrary
     @ObservedObject var hotKeys: HotKeyManager
     @ObservedObject var home:HomeLibrary
+    @ObservedObject var recentApps:RecentAppLibrary
     @StateObject private var categoryOrder = CategoryOrder()
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
@@ -53,7 +54,7 @@ struct SearchPanel: View {
                 }
                 if model.isSearching || model.refreshingQuick { ProgressView().controlSize(.small) }
             }
-            .padding(.horizontal, 24).padding(.vertical, 22)
+            .padding(.horizontal, 18).padding(.vertical, 16)
             if let value=DuckCalculator.evaluate(model.query) {
                 Button {NSPasteboard.general.clearContents();NSPasteboard.general.setString(value,forType:.string)} label: {HStack {Image(systemName:"equal.circle");Text(value).font(.system(size:24,weight:.medium)).monospacedDigit();Spacer();Text("回车复制结果").font(.caption).foregroundStyle(.secondary)}.padding(.horizontal,24).padding(.vertical,12)}.buttonStyle(.plain)
             }
@@ -71,9 +72,9 @@ struct SearchPanel: View {
                             quickEntry("今天微信接收到的文件", scope: .wechat)
                             quickEntry("今天下载的文件", scope: .downloads)
                             quickEntry("最近打开文件", scope: .recent).help("仅保留最近50个文件，可在其中继续筛选")
-                            scopeEntry("共享盘",active:model.scopeTitle == "共享盘" && model.directoryScope == nil) {model.activateShared()}
+                            scopeEntry("共享盘",active:model.scopeTitle == "共享盘" && model.directoryScope == nil) {model.toggleShared()}
                             ForEach(model.directoryShortcuts,id:\.self) {url in
-                                scopeEntry(url.lastPathComponent.isEmpty ? "/" : url.lastPathComponent,active:model.directoryScope == url) {model.activateDirectory(url)}
+                                scopeEntry(url.lastPathComponent.isEmpty ? "/" : url.lastPathComponent,active:model.directoryScope == url) {model.toggleDirectory(url)}
                                     .help(url.path).contextMenu {Button("移除快捷入口") {model.removeDirectoryShortcut(url)}}
                             }
                             Button {model.chooseDirectoryShortcut();hotKeys.focusSearchInput()} label: {Label("增加目录",systemImage:"plus")}
@@ -83,13 +84,13 @@ struct SearchPanel: View {
                 }
                 Spacer()
             }.font(.system(size:11)).padding(.horizontal,20).padding(.vertical,10)
-            tagFilters
+            if !model.availableAnnotationPaths.isEmpty {tagFilters}
             if !model.isHome {
             HStack(spacing: 5) {
                 ForEach(categoryOrder.categories) { category in
                     Button { model.category = category; hotKeys.focusSearchInput() } label: {
                         Text(category.rawValue).font(.system(size: 12, weight: model.category == category ? .semibold : .regular))
-                            .frame(minWidth:54,minHeight:34).padding(.horizontal,4).contentShape(Capsule())
+                            .frame(minWidth:48,minHeight:34).padding(.horizontal,3).contentShape(Capsule())
                             .foregroundStyle(model.category == category ? Color.accentColor : Color.secondary)
                             .background(model.category == category ? Color.accentColor.opacity(0.12) : Color.clear, in: Capsule())
                     }.buttonStyle(.plain)
@@ -121,7 +122,7 @@ struct SearchPanel: View {
             if !categoryOrder.error.isEmpty {Text(categoryOrder.error).font(.caption).foregroundStyle(.red)}
             if !model.status.isEmpty {Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(2).padding(.horizontal,20)}
             if model.isHome {
-                HomePanel(home:home,model:model,hotKeys:hotKeys).frame(maxWidth:.infinity,maxHeight:.infinity)
+                HomePanel(home:home,model:model,hotKeys:hotKeys,recentApps:recentApps).frame(maxWidth:.infinity,maxHeight:.infinity)
             } else if model.hits.isEmpty {
                 emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -146,7 +147,7 @@ struct SearchPanel: View {
         }
         .background(Color(nsColor: .textBackgroundColor))
         .ignoresSafeArea(.container, edges: .top)
-        .frame(minWidth: 860, minHeight: 500)
+        .frame(minWidth: 700, minHeight: 500)
         .background(WindowBridge { window in
             window.styleMask.insert([.titled, .fullSizeContentView])
             window.isOpaque = false
@@ -159,7 +160,7 @@ struct SearchPanel: View {
             hotKeys.searchWindow = window
             if let screen=window.screen ?? NSScreen.main {
                 let visible=screen.visibleFrame
-                window.setContentSize(NSSize(width:min(920,visible.width-40),height:min(580,visible.height-60)))
+                window.setContentSize(NSSize(width:min(760,visible.width-40),height:min(580,visible.height-60)))
                 window.center()
             }
             window.makeKeyAndOrderFront(nil)
@@ -193,7 +194,7 @@ struct SearchPanel: View {
     }
     private func quickEntry(_ title: String, scope: QuickScope) -> some View {
         let active = model.quickScope == scope && model.directoryScope == nil
-        return Button { model.activateQuick(scope); hotKeys.focusSearchInput() } label: {
+        return Button { model.toggleQuick(scope); hotKeys.focusSearchInput() } label: {
             Label(title, systemImage: "magnifyingglass")
                 .font(.system(size: 12, weight: active ? .semibold : .regular))
                 .padding(.horizontal, 12).padding(.vertical, 6)
@@ -239,7 +240,7 @@ struct SearchPanel: View {
                 .accessibilityLabel(file.isDirectory ? "文件夹" : "默认打开软件图标")
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing:6) {
-                    Text(DisplayPath.highlighted(file.name,query:model.query)).font(.system(size:13,weight:.semibold)).lineLimit(1)
+                    HighlightedName(name:file.name,query:model.query).frame(height:18)
                     ForEach(model.tags(file)) {tag in trackedTag(tag,file:file)}
                     if let note=model.preferences.fileNotes?[file.id],!note.isEmpty {trackedTag(FileTag(id:"note",name:note,color:.gray),file:file)}
                 }
@@ -284,6 +285,7 @@ struct SearchPanel: View {
         let menu=NSMenu()
         menu.addItem(ResultMenus.item("打开") {model.open(file)})
         menu.addItem(ResultMenus.item("在 Finder 中显示") {model.reveal(file)})
+        menu.addItem(ResultMenus.item("添加到首页常用文件") {_=home.pin(file.url)})
         menu.addItem(ResultMenus.item("复制路径") {NSPasteboard.general.clearContents();NSPasteboard.general.setString(file.url.path,forType:.string)})
         menu.addItem(.separator())
         let palette=NSMenuItem();palette.view=TagColorPalette(selected:{Set(model.tags(file).filter {$0.name.isEmpty}.map(\.color))},toggle:{model.toggleTag(file,FileTag.builtin($0))});menu.addItem(palette)
@@ -302,8 +304,8 @@ struct SearchPanel: View {
         ScrollView(.horizontal) {
             HStack(spacing:8) {
                 Button {model.tagFilter=model.tagFilter == "*" ? nil : "*";hotKeys.focusSearchInput()} label: {Text("所有标签").font(.system(size:12)).padding(.horizontal,12).frame(height:30).background(model.tagFilter == "*" ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.045),in:Capsule()).foregroundStyle(model.tagFilter == "*" ? Color.accentColor : .secondary)}.buttonStyle(.plain)
-                ForEach(model.tagCatalog) {tag in
-                    Button {model.tagFilter=model.tagFilter == tag.id ? nil : tag.id;hotKeys.focusSearchInput()} label: {HStack(spacing:5) {TagBadge(tag:tag);if model.tagFilter == tag.id {Image(systemName:"checkmark").font(.caption)}}.padding(.horizontal,8).frame(height:30).background(model.tagFilter == tag.id ? Color.accentColor.opacity(0.12) : Color.clear,in:Capsule()).contentShape(Capsule())}.buttonStyle(.plain).help(tag.displayName)
+                ForEach(model.visibleTags) {tag in
+                    Button {model.tagFilter=model.tagFilter == tag.id ? nil : tag.id;hotKeys.focusSearchInput()} label: {HStack(spacing:5) {TagBadge(tag:tag)}.padding(.horizontal,8).frame(height:30).background(model.tagFilter == tag.id ? Color.accentColor.opacity(0.12) : Color.clear,in:Capsule()).contentShape(Capsule())}.buttonStyle(.plain).help(tag.displayName)
                 }
             }
         }.scrollIndicators(.hidden).frame(height:32).padding(.horizontal,20).padding(.bottom,6)
@@ -539,7 +541,8 @@ struct SearchSettings: View {
                 Text(hotKeys.message).font(.callout).foregroundStyle(hotKeys.hasError ? Color.red : Color.secondary)
             }
             Section {
-                Text("点击快捷键后直接按下新组合键，按 Esc 取消。至少搭配 Control、Option 或 Command 中的一个键。")
+                Text("点击快捷键后按下新快捷键，Esc取消。F1–F12可单独使用，其他按键需搭配Control、Option或Command。")
+                Text("若F键优先控制亮度或音量，请使用键盘的标准功能键模式。")
                 Text("在其他应用中也能呼出搜索并聚焦输入框。按 Esc 隐藏搜索窗口，找鸭继续常驻菜单栏；点击“退出找鸭”或按 ⌘Q 才会退出。")
             }.font(.caption).foregroundStyle(.secondary)
         }.formStyle(.grouped)
@@ -624,9 +627,10 @@ struct SearchSettings: View {
     @StateObject private var model = SearchLibrary()
     @StateObject private var hotKeys = HotKeyManager()
     @StateObject private var home = HomeLibrary()
+    @StateObject private var recentApps = RecentAppLibrary()
     var body: some Scene {
-        WindowGroup("找鸭", id: "search") { SearchPanel(model: model, hotKeys: hotKeys, home: home).onAppear { appDelegate.hotKeys = hotKeys; appDelegate.library = model; if CommandLine.arguments.contains("--verify-startup") {DispatchQueue.main.asyncAfter(deadline:.now()+0.7) {model.refreshRecents()}} } }
-            .windowStyle(.hiddenTitleBar).defaultSize(width: 920, height: 580)
+        WindowGroup("找鸭", id: "search") { SearchPanel(model: model, hotKeys: hotKeys, home: home,recentApps:recentApps).onAppear { appDelegate.hotKeys = hotKeys; appDelegate.library = model; if CommandLine.arguments.contains("--verify-startup") {DispatchQueue.main.asyncAfter(deadline:.now()+0.7) {model.refreshRecents()}} } }
+            .windowStyle(.hiddenTitleBar).defaultSize(width: 760, height: 580)
             .commands {
                 CommandGroup(replacing: .newItem) { Button("显示搜索") { hotKeys.invoke() }.keyboardShortcut("f", modifiers: [.command, .shift]) }
             }

@@ -20,6 +20,18 @@ actor OilQueryEngine {
     private func hit(_ store:IndexStore,_ id:UInt32) -> FileHit {
         FileHit(url:URL(fileURLWithPath:store.path(id)),isDirectory:store.kind[Int(id)] == 1,modified:store.mtime[Int(id)] == 0 ? nil : store.modified(id))
     }
+    func liveAnnotationPaths(local:[OilStoreHandle],sharedSnapshot:NameIndex?,paths:Set<String>)->Set<String> {
+        guard !paths.isEmpty else {return []}
+        let handles=local+(sharedHandle(sharedSnapshot).map {[$0]} ?? [])
+        var result=Set<String>()
+        for handle in handles {handle.store.read {
+            for path in paths {
+                if Task.isCancelled {return}
+                if let id=handle.store.resolve(path:path),handle.store.isLive(id),!handle.hiddenEntryIDs.contains(id) {result.insert(path)}
+            }
+        }}
+        return result
+    }
     func recentSnapshot(local:[OilStoreHandle],sharedSnapshot:NameIndex?,opened:[String:Date],preferences:DuckPreferences) -> NameIndex {
         let handles=local + (sharedHandle(sharedSnapshot).map {[$0]} ?? [])
         let ordered=opened.sorted {$0.value == $1.value ? $0.key < $1.key : $0.value > $1.value}

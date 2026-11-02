@@ -12,14 +12,17 @@ struct HotKeySettings: Codable, Equatable, Sendable {
         let parts: [(Int, String)] = [(controlKey, "⌃"), (optionKey, "⌥"), (shiftKey, "⇧"), (cmdKey, "⌘")]
         return parts.filter { modifiers & UInt32($0.0) != 0 }.map(\.1).joined() + label
     }
+    static let functionKeys:Set<UInt32>=[122,120,99,118,96,97,98,100,101,109,103,111]
+    static func allowed(keyCode:UInt32,modifiers:UInt32)->Bool {modifiers & UInt32(controlKey | optionKey | cmdKey) != 0 || (modifiers == 0 && functionKeys.contains(keyCode))}
     static func from(_ event: NSEvent) -> HotKeySettings? {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        guard !flags.intersection([.command, .control, .option]).isEmpty else { return nil }
+
         var modifiers: UInt32 = 0
         if flags.contains(.command) { modifiers |= UInt32(cmdKey) }
         if flags.contains(.control) { modifiers |= UInt32(controlKey) }
         if flags.contains(.option) { modifiers |= UInt32(optionKey) }
         if flags.contains(.shift) { modifiers |= UInt32(shiftKey) }
+        guard allowed(keyCode:UInt32(event.keyCode),modifiers:modifiers) else {return nil}
         let special: [UInt16: String] = [49:"空格",36:"↩",48:"⇥",51:"⌫",117:"⌦",123:"←",124:"→",125:"↓",126:"↑",122:"F1",120:"F2",99:"F3",118:"F4",96:"F5",97:"F6",98:"F7",100:"F8",101:"F9",109:"F10",103:"F11",111:"F12",105:"F13",107:"F14",113:"F15",106:"F16",64:"F17",79:"F18",80:"F19",90:"F20"]
         let label = special[event.keyCode] ?? event.charactersIgnoringModifiers?.uppercased() ?? ""
         guard !label.isEmpty else { return nil }
@@ -99,12 +102,12 @@ private let callback: EventHandlerUPP = { _, event, context in
     func cancelRecording() { guard isRecording else { return }; isRecording = false; registerCurrent() }
     func capture(_ event: NSEvent) {
         if event.keyCode == 53 { cancelRecording(); return }
-        guard let candidate = HotKeySettings.from(event) else { hasError = true; message = "请至少搭配 Control、Option 或 Command 中的一个键。"; return }
+        guard let candidate = HotKeySettings.from(event) else { hasError = true; message = "F1–F12可单独使用，其他按键请搭配Control、Option或Command。"; return }
         apply(candidate)
     }
     func apply(_ candidate: HotKeySettings) {
-        guard candidate.modifiers & UInt32(controlKey | optionKey | cmdKey) != 0 else {
-            hasError = true; message = "请搭配 Control、Option 或 Command 键。"; return
+        guard HotKeySettings.allowed(keyCode:candidate.keyCode,modifiers:candidate.modifiers) else {
+            hasError = true; message = "F1–F12可单独使用，其他按键请搭配Control、Option或Command。"; return
         }
         let old = settings
         unregister(); isRecording = false

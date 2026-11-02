@@ -55,6 +55,16 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     private var deepTask:Task<Void,Never>?,deepHits:[FileHit]=[],deepQuery=""
     private var stopping=false
     private var batching=false,displayLimit=200,lastRequest=""
+    private var preserveHitOrder=false
+    private var annotationTask:Task<Void,Never>?
+    private var annotationID=UUID()
+    @Published private(set) var availableAnnotationPaths=Set<String>()
+    var visibleTags:[FileTag] {
+        let used=Set(availableAnnotationPaths.flatMap {Array(preferences.fileTags?[$0] ?? [])})
+        return tagCatalog.enumerated().filter {used.contains($0.element.id)}.sorted {a,b in
+            if a.element.name.isEmpty != b.element.name.isEmpty {return !a.element.name.isEmpty};return a.offset < b.offset
+        }.map(\.element)
+    }
     private let systemRecents=SystemRecents()
     private var systemOpened:[String:Date]=[:],lastRecents:Date?
     var folder:URL? {sources.first?.url}
@@ -81,7 +91,7 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
         let found=detectWechat();if preferences.wechatFolder != found {preferences.wechatFolder=found;savePreferences()}
         if let data=try? Data(contentsOf:self.storage.appendingPathComponent("directory-shortcuts.json")),let urls=try? JSONDecoder().decode([URL].self,from:data) {directoryShortcuts=urls}
         if let data=try? Data(contentsOf:self.storage.appendingPathComponent("search-history.json")),let values=try? JSONDecoder().decode([String].self,from:data) {searchHistory=Array(values.prefix(5))}
-        configureAll()
+        configureAll();refreshAnnotationAvailability()
     }
     private func detectWechat()->URL? {WechatLocations.locate(home:FileManager.default.homeDirectoryForCurrentUser,existing:preferences.wechatFolder)}
     private var scanPolicy:ScanPolicy {var value=policy;value.excludedPaths=Array(Set(policy.excludedPaths+preferences.effectiveBlacklist));return value}
@@ -109,6 +119,7 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
             do {try await Task.sleep(for:.milliseconds(150))} catch {return}
             guard let self else {return};refreshTask=nil
             if sharedDirty {sharedDirty=false;rebuildShared()}
+            refreshAnnotationAvailability()
             objectWillChange.send()
             if hasIndex && status.hasPrefix("Oil Find 首次") {status=""}
             if !query.isEmpty || scopeTitle != nil || tagFilter != nil {search()}
@@ -200,7 +211,7 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
         status=""
         if !term.isEmpty {scheduleHistory(term)}
         let request="\(directoryScope?.path ?? "")|\(term)|\(quick.rawValue)|\(category.rawValue)|\(resultSort.rawValue)|\(localSelected)|\(sharedSelected)|\(preferences.suppressNoise)|\(tagFilter ?? "")"
-        if lastRequest != request {displayLimit=200;lastRequest=request}
+        if lastRequest != request {displayLimit=200;lastRequest=request;preserveHitOrder=false}
         let id=UUID();searchID=id;isSearching=true
         let prefs:DuckPreferences={var value=preferences;value.tagFilter=tagFilter;return value}()
         let oilSearch=oilSearch,compactSearch=compactSearch,system=systemOpened,sort=resultSort,category=category,limit=displayLimit
@@ -226,7 +237,28 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
             }
             let result=await withTaskCancellationHandler {await worker.value} onCancel:{worker.cancel()}
             guard !Task.isCancelled,searchID == id else {return}
-            hits=result.hits;resultCount=result.total;isSearching=false
+            if preserveHitOrder {
+                let ranks=Dictionary(uniqueKeysWithValues:hits.enumerated().map {($0.element.id,$0.offset)})
+                hits=result.hits.enumerated().sorted {a,b in
+                    let ar=ranks[a.element.id] ?? Int.max,br=ranks[b.element.id] ?? Int.max
+                    return ar == br ? a.offset < b.offset : ar < br
+                }.map(\.element)
+            } else {hits=result.hits}
+            resultCount=result.total;isSearching=false
+        }
+    }
+    func toggleQuick(_ scope:QuickScope) {if quickScope == scope && directoryScope == nil {clearScope()} else {activateQuick(scope)}}
+    func toggleShared() {if !localSelected && sharedSelected && quickScope == .none && directoryScope == nil {clearScope()} else {activateShared()}}
+    func toggleDirectory(_ url:URL) {if directoryScope == url.standardizedFileURL {clearScope()} else {activateDirectory(url)}}
+    func refreshAnnotationAvailability() {
+        annotationTask?.cancel();let id=UUID();annotationID=id
+        let paths=preferences.annotatedPaths,locals=localEngines.values.compactMap(\.handle),snapshot=index
+        let exclusions=DuckExclusions(preferences.effectiveBlacklist),blocked=preferences.blockedFiles ?? []
+        annotationTask=Task {
+            let live=await oilSearch.liveAnnotationPaths(local:locals,sharedSnapshot:snapshot,paths:paths)
+            guard !Task.isCancelled,annotationID == id else {return}
+            let values=Set(live.filter {!blocked.contains($0) && !exclusions.contains(URL(fileURLWithPath:$0))})
+            if values != availableAnnotationPaths {availableAnnotationPaths=values}
         }
     }
     func activateQuick(_ quick:QuickScope) {
@@ -341,7 +373,7 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     }
     func buildIndex() {for engine in localEngines.values {engine.rebuild()};for engine in sharedEngines.values {engine.buildIndex()}}
     func cancelIndex() {for engine in localEngines.values {engine.cancelScan()};for engine in sharedEngines.values {engine.cancelIndex()}}
-    func shutdown() {rememberSearch(query);stopping=true;historyTask?.cancel();historyCandidate="";refreshTask?.cancel();refreshTask=nil;quickWatcher?.stop();quickWatcher=nil;watchedQuickRoot=nil;quickWatchTask?.cancel();quickWatchTask=nil;quickTask?.cancel();quickID=UUID();refreshingQuick=false;quickNeedsRefresh=false;for engine in localEngines.values {engine.stop()};for engine in sharedEngines.values {engine.autoUpdate=false;engine.cancelIndex()}}
+    func shutdown() {annotationTask?.cancel();annotationID=UUID();rememberSearch(query);stopping=true;historyTask?.cancel();historyCandidate="";refreshTask?.cancel();refreshTask=nil;quickWatcher?.stop();quickWatcher=nil;watchedQuickRoot=nil;quickWatchTask?.cancel();quickWatchTask=nil;quickTask?.cancel();quickID=UUID();refreshingQuick=false;quickNeedsRefresh=false;for engine in localEngines.values {engine.stop()};for engine in sharedEngines.values {engine.autoUpdate=false;engine.cancelIndex()}}
     func setLocalOptions(_ options:LocalIndexOptions) {preferences.localIndexOptions=options;savePreferences();configureLocals();search()}
     func toggleNoise(_ enabled:Bool) {preferences.suppressNoise=enabled;savePreferences();search()}
     func addBlacklist(_ url:URL,developer:Bool=false) {
@@ -374,9 +406,9 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     func setTag(_ file:FileHit,_ tag:FileTag,enabled:Bool) {
         var mapping=preferences.fileTags ?? [:],ids=mapping[file.id] ?? []
         if enabled {ids.insert(tag.id)} else {ids.remove(tag.id)}
-        mapping[file.id]=ids.isEmpty ? nil : ids;preferences.fileTags=mapping;savePreferences();search()
+        mapping[file.id]=ids.isEmpty ? nil : ids;preferences.fileTags=mapping;preserveHitOrder=true;savePreferences();refreshAnnotationAvailability();search()
     }
-    func clearTags(_ file:FileHit) {preferences.fileTags?.removeValue(forKey:file.id);savePreferences();search()}
+    func clearTags(_ file:FileHit) {preferences.fileTags?.removeValue(forKey:file.id);preserveHitOrder=true;savePreferences();refreshAnnotationAvailability();search()}
     @discardableResult func createTag(name:String,color:FileMarkColor,applyTo file:FileHit)->FileTag? {
         let name=name.trimmingCharacters(in:.whitespacesAndNewlines);guard !name.isEmpty else {return nil}
         let tag=(preferences.customTags ?? []).first {$0.name.caseInsensitiveCompare(name) == .orderedSame && $0.color == color} ?? FileTag(id:UUID().uuidString,name:name,color:color)
@@ -386,16 +418,16 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     func updateTag(_ tag:FileTag,name:String,color:FileMarkColor) {
         guard let i=preferences.customTags?.firstIndex(where:{$0.id == tag.id}) else {return}
         let name=name.trimmingCharacters(in:.whitespacesAndNewlines);guard !name.isEmpty else {return}
-        preferences.customTags?[i].name=name;preferences.customTags?[i].color=color;savePreferences();search()
+        preferences.customTags?[i].name=name;preferences.customTags?[i].color=color;preserveHitOrder=true;savePreferences();refreshAnnotationAvailability();search()
     }
     func deleteTag(_ tag:FileTag) {
         preferences.customTags?.removeAll {$0.id == tag.id}
         for path in Array(preferences.fileTags?.keys ?? Dictionary<String,Set<String>>().keys) {preferences.fileTags?[path]?.remove(tag.id)}
-        if tagFilter == tag.id {tagFilter=nil};savePreferences();search()
+        if tagFilter == tag.id {tagFilter=nil};preserveHitOrder=true;savePreferences();refreshAnnotationAvailability();search()
     }
-    func blockFile(_ file:FileHit) {var paths=preferences.blockedFiles ?? [];paths.insert(file.id);preferences.blockedFiles=paths;savePreferences();search()}
-    func unblockFile(_ path:String) {preferences.blockedFiles?.remove(path);savePreferences();search()}
-    func setNote(_ text:String,file:FileHit) {var notes=preferences.fileNotes ?? [:];let text=text.trimmingCharacters(in:.whitespacesAndNewlines);notes[file.id]=text.isEmpty ? nil : text;preferences.fileNotes=notes;savePreferences();search()}
+    func blockFile(_ file:FileHit) {var paths=preferences.blockedFiles ?? [];paths.insert(file.id);preferences.blockedFiles=paths;savePreferences();refreshAnnotationAvailability();search()}
+    func unblockFile(_ path:String) {preferences.blockedFiles?.remove(path);savePreferences();refreshAnnotationAvailability();search()}
+    func setNote(_ text:String,file:FileHit) {var notes=preferences.fileNotes ?? [:];let text=text.trimmingCharacters(in:.whitespacesAndNewlines);notes[file.id]=text.isEmpty ? nil : text;preferences.fileNotes=notes;preserveHitOrder=true;savePreferences();refreshAnnotationAvailability();search()}
     func chooseNote(_ file:FileHit) {
         let alert=NSAlert();alert.messageText="文件备注";alert.informativeText="仅用于当前文件，留空可移除备注。";alert.addButton(withTitle:"保存");alert.addButton(withTitle:"取消")
         let field=NSTextField(frame:NSRect(x:0,y:0,width:340,height:28));field.stringValue=preferences.fileNotes?[file.id] ?? "";field.setAccessibilityLabel("文件备注");alert.accessoryView=field;alert.window.initialFirstResponder=field

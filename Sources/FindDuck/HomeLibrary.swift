@@ -2,7 +2,7 @@ import Foundation
 import AppKit
 import Combine
 
-enum HomeKind:String,Codable,Sendable {case application,website,folder,action}
+enum HomeKind:String,Codable,Sendable {case application,website,folder,file,action}
 enum HomeAction:String,CaseIterable,Codable,Sendable,Identifiable {
     case downloads="今天下载的文件",wechat="今天微信接收到的文件",recent="最近打开文件",desktop="桌面",settings="设置"
     var id:String {rawValue}
@@ -13,7 +13,7 @@ struct HomeShortcut:Codable,Identifiable,Equatable,Sendable {
     var title:String
     var kind:HomeKind
     var target:String
-    var group:Int {switch kind {case .application:0;case .website:1;case .folder,.action:2}}
+    var group:Int {switch kind {case .application:0;case .website:1;case .folder,.file:3;case .action:2}}
 }
 @MainActor final class HomeLibrary:ObservableObject {
     private struct Settings:Codable {var items:[HomeShortcut];var resumeWindowSeconds:Double?}
@@ -51,6 +51,13 @@ struct HomeShortcut:Codable,Identifiable,Equatable,Sendable {
         guard !title.isEmpty else {error="请填写入口名称。";return false}
         items.append(HomeShortcut(title:title,kind:kind,target:value));error="";save();return true
     }
+    @discardableResult func pin(_ url:URL)->Bool {
+        guard url.isFileURL else {error="只能固定本机或已挂载磁盘的文件。";return false}
+        let value=url.standardizedFileURL
+        guard let resources=try? value.resourceValues(forKeys:[.isDirectoryKey,.isApplicationKey]) else {error="无法读取此文件。";return false}
+        let kind:HomeKind=resources.isApplication == true ? .application : resources.isDirectory == true ? .folder : .file
+        return add(title:value.lastPathComponent,kind:kind,target:value.path)
+    }
     func remove(_ item:HomeShortcut) {items.removeAll {$0.id == item.id};save()}
     func rename(_ item:HomeShortcut,title:String) {
         guard let index=items.firstIndex(where:{$0.id == item.id}),!title.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else {return}
@@ -64,6 +71,13 @@ struct HomeShortcut:Codable,Identifiable,Equatable,Sendable {
     func move(id:UUID,to target:HomeShortcut) {
         guard let from=items.firstIndex(where:{$0.id == id}),let to=items.firstIndex(where:{$0.id == target.id}),from != to,items[from].group == target.group else {return}
         let item=items.remove(at:from);items.insert(item,at:to);save()
+    }
+    func reorder(group:Int,ids:[UUID]) {
+        let peers=items.filter {$0.group == group}
+        guard ids.count == peers.count,Set(ids) == Set(peers.map(\.id)),ids != peers.map(\.id) else {return}
+        let lookup=Dictionary(uniqueKeysWithValues:peers.map {($0.id,$0)})
+        var iterator=ids.makeIterator()
+        items=items.map {item in item.group == group ? lookup[iterator.next()!]! : item};save()
     }
     private func save() {
         do {try FileManager.default.createDirectory(at:storage.deletingLastPathComponent(),withIntermediateDirectories:true);try JSONEncoder().encode(Settings(items:items,resumeWindowSeconds:resumeWindowSeconds)).write(to:storage,options:.atomic)} catch {self.error="主页设置保存失败：\(error.localizedDescription)"}
