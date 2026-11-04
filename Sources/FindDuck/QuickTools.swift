@@ -3,6 +3,17 @@ import SwiftUI
 
 // A small arithmetic grammar; no script evaluation or external process is involved.
 enum DuckCalculator {
+    static func preview(_ text: String) -> (value: String, complete: Bool)? {
+        if let value = evaluate(text) { return (value, true) }
+        var prefix = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let operators = "+-*/^%×÷"
+        guard let last = prefix.last, operators.contains(last) else { return nil }
+        while let last = prefix.last, operators.contains(last) || last.isWhitespace { prefix.removeLast() }
+        if let value = evaluate(prefix) { return (value, false) }
+        if let amount = CurrencyMath.amount(prefix) { return (NSDecimalNumber(decimal: amount).stringValue, false) }
+        return nil
+    }
+
     static func evaluate(_ text:String)->String? {
         let raw=text.trimmingCharacters(in:.whitespacesAndNewlines).replacingOccurrences(of:"=",with:"").replacingOccurrences(of:"×",with:"*").replacingOccurrences(of:"÷",with:"/")
         guard raw.count <= 256,raw.contains(where:{"+-*/^%".contains($0)}),raw.allSatisfy({$0.isNumber || $0.isWhitespace || ".()+-*/^%".contains($0)}) else {return nil}
@@ -38,43 +49,191 @@ struct QuickText:Codable,Identifiable,Equatable {var id=UUID();var title:String;
     @Published var error=""
     private let file:URL
     init(file:URL?=nil) {
-        self.file=file ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("com.chenhuang.smbsearch/quick-texts.json")
+        self.file=file ?? BiuStorage.directory.appendingPathComponent("quick-texts.json")
         if let data=try? Data(contentsOf:self.file),let values=try? JSONDecoder().decode([QuickText].self,from:data) {items=values}
     }
-    func save(_ item:QuickText) {if let i=items.firstIndex(where:{$0.id == item.id}) {items[i]=item} else {items.append(item)};persist()}
-    func remove(_ item:QuickText) {items.removeAll {$0.id == item.id};persist()}
-    private func persist() {do {try FileManager.default.createDirectory(at:file.deletingLastPathComponent(),withIntermediateDirectories:true);try JSONEncoder().encode(items).write(to:file,options:.atomic)} catch {self.error=error.localizedDescription}}
-}
-enum HomeTool:String,Identifiable {case snippets="快捷文本",rates="人民币汇率",world="世界时间";var id:String {rawValue}}
-struct QuickToolsPanel:View {
-    let tool:HomeTool
-    @Environment(\.dismiss) private var dismiss
-    var body:some View {VStack(alignment:.leading,spacing:16) {HStack {Text(tool.rawValue).font(.headline);Spacer();Button("完成") {dismiss()}};switch tool {case .snippets:QuickTextsView();case .rates:ExchangeRatesView();case .world:WorldClockView()}}.padding(20).frame(width:560,height:tool == .snippets ? 440 : tool == .rates ? 560 : 500)}
-}
-private struct QuickTextsView:View {
-    @StateObject private var model=QuickTextLibrary()
-    @State private var editing:QuickText?
-    @State private var copied=""
-    @State private var hovered:UUID?
-    var body:some View {
-        VStack(alignment:.leading) {
-            List {ForEach(model.items) {item in HStack {
-                VStack(alignment:.leading,spacing:4) {Text(item.title);Text(item.text).font(.caption).foregroundStyle(.secondary).lineLimit(2)}
-                    .frame(maxWidth:.infinity,alignment:.leading).padding(10).background(Color.accentColor.opacity(hovered == item.id ? 0.10 : 0),in:RoundedRectangle(cornerRadius:8)).contentShape(Rectangle())
-                    .onHover {inside in if inside {hovered=item.id} else if hovered == item.id {hovered=nil}}
-                    .onTapGesture(count:2) {copy(item)}.help("双击复制到剪切板").accessibilityAddTraits(.isButton).accessibilityAction {copy(item)}
-                Button("编辑") {editing=item};Button("删除") {model.remove(item)}
-            }.padding(.vertical,5)}}
-            HStack {Text("双击文本复制").font(.caption).foregroundStyle(.secondary);Button("增加文本") {editing=QuickText(title:"",text:"")};Text(model.error.isEmpty ? copied : model.error).font(.caption).foregroundStyle(.secondary)}
-        }.sheet(item:$editing) {item in QuickTextEditor(item:item,save:model.save)}
+    @discardableResult
+    func save(_ item: QuickText) -> Bool {
+        var updated = items
+        if let index = updated.firstIndex(where: { $0.id == item.id }) {
+            updated[index] = item
+        } else {
+            updated.append(item)
+        }
+        return persist(updated)
     }
-    private func copy(_ item:QuickText) {NSPasteboard.general.clearContents();NSPasteboard.general.setString(item.text,forType:.string);copied="已复制："+item.title}
+
+    func remove(_ item: QuickText) { _ = persist(items.filter { $0.id != item.id }) }
+
+    private func persist(_ updated: [QuickText]) -> Bool {
+        do {
+            try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(updated).write(to: file, options: .atomic)
+            items = updated
+            error = ""
+            return true
+        } catch {
+            self.error = error.localizedDescription
+            return false
+        }
+    }
 }
-private struct QuickTextEditor:View {
-    @State var item:QuickText
-    let save:(QuickText)->Void
+enum HomeTool: String, Identifiable {
+    case rates = "人民币汇率", world = "世界时间"
+    var id: String { rawValue }
+}
+
+struct QuickToolsPanel: View {
+    let tool: HomeTool
     @Environment(\.dismiss) private var dismiss
-    var body:some View {VStack(alignment:.leading,spacing:12) {TextField("名称",text:$item.title);TextEditor(text:$item.text).frame(height:180);HStack {Button("取消") {dismiss()};Spacer();Button("保存") {save(item);dismiss()}.disabled(item.title.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || item.text.isEmpty)}}.padding(20).frame(width:400)}
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack { Text(tool.rawValue).font(.headline); Spacer(); Button("完成") { dismiss() } }
+            switch tool {
+            case .rates: ExchangeRatesView()
+            case .world: WorldClockView()
+            }
+        }.padding(20).frame(width: 560, height: tool == .rates ? 560 : 500)
+    }
+}
+struct QuickTextsView: View {
+    @ObservedObject var model: QuickTextLibrary
+    @State private var editing: QuickText?
+    @State private var copied: UUID?
+    @State private var hovered: UUID?
+    @State private var selected: UUID?
+    @State private var query = ""
+    @FocusState private var listFocused: Bool
+
+    private var matches: [QuickText] {
+        guard !query.isEmpty else { return model.items }
+        return model.items.filter { $0.title.localizedStandardContains(query) || $0.text.localizedStandardContains(query) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Button("增加文本", systemImage: "plus") { editing = QuickText(title: "", text: "") }
+                Spacer()
+                TextField("搜索", text: $query).textFieldStyle(.roundedBorder).frame(maxWidth: 140)
+            }
+            if matches.isEmpty {
+                ContentUnavailableView(query.isEmpty ? "暂无快捷文本" : "没有找到匹配文本",
+                                       systemImage: "text.quote")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollViewReader { proxy in
+                    List {
+                        ForEach(Array(matches.enumerated()), id: \.element.id) { index, item in
+                            row(item, number: index + 1)
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
+                                .id(item.id)
+                        }
+                    }
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
+                    .focusable()
+                    .focusEffectDisabled()
+                    .focused($listFocused)
+                    .defaultFocus($listFocused, true)
+                    .onKeyPress(.upArrow) { moveSelection(-1, proxy: proxy) }
+                    .onKeyPress(.downArrow) { moveSelection(1, proxy: proxy) }
+                    .onKeyPress(.return, phases: .down) { _ in
+                        guard let item = matches.first(where: { $0.id == selected }) else { return .ignored }
+                        copy(item)
+                        return .handled
+                    }
+                }
+            }
+            Text(model.error.isEmpty ? "↑↓ 选择 · 回车或双击复制" : model.error)
+                .font(.caption).foregroundStyle(model.error.isEmpty ? Color.secondary : Color.red)
+        }
+        .onChange(of: query) { selected = nil }
+        .sheet(item: $editing) { QuickTextEditor(item: $0, save: model.save) }
+    }
+
+    private func row(_ item: QuickText, number: Int) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(number.formatted()).monospacedDigit()
+                .foregroundStyle(Color(red: 8.0 / 255, green: 88.0 / 255, blue: 240.0 / 255))
+                .frame(minWidth: 24, alignment: .leading)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Label(item.title, systemImage: "text.quote").lineLimit(1)
+                    Spacer()
+                    if copied == item.id { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green).accessibilityLabel("已复制") }
+                    action("复制", icon: "doc.on.doc") { copy(item) }
+                    action("编辑", icon: "pencil") { editing = item }
+                    action("删除", icon: "trash") {
+                        model.remove(item)
+                        if selected == item.id { selected = nil }
+                    }
+                }
+                Text(item.text).font(.system(size: 13)).lineLimit(4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+        .font(.system(size: 12))
+        .padding(8)
+        .frame(height: 136, alignment: .topLeading)
+        .background(selected == item.id || hovered == item.id ? FindDuckHighlight.selected : .clear,
+                    in: RoundedRectangle(cornerRadius: 11))
+        .contentShape(Rectangle())
+        .onHover { hovered = $0 ? item.id : nil }
+        .onTapGesture(count: 2) { copy(item) }
+        .accessibilityAddTraits(selected == item.id ? .isSelected : [])
+        .accessibilityAction(named: Text("复制")) { copy(item) }
+    }
+
+    private func action(_ title: String, icon: String, run: @escaping () -> Void) -> some View {
+        Button(action: run) {
+            Image(systemName: icon).frame(width: 20, height: 20).contentShape(Rectangle())
+        }
+        .buttonStyle(.plain).help(title).accessibilityLabel(title)
+    }
+
+    private func moveSelection(_ offset: Int, proxy: ScrollViewProxy) -> KeyPress.Result {
+        let items = matches
+        guard !items.isEmpty else { return .ignored }
+        let current = items.firstIndex { $0.id == selected } ?? (offset > 0 ? -1 : items.count)
+        let id = items[min(max(current + offset, 0), items.count - 1)].id
+        selected = id
+        proxy.scrollTo(id)
+        return .handled
+    }
+
+    private func copy(_ item: QuickText) {
+        NSPasteboard.general.clearContents()
+        if NSPasteboard.general.setString(item.text, forType: .string) {
+            copied = item.id
+            model.error = ""
+        } else {
+            model.error = "复制失败"
+        }
+    }
+}
+struct QuickTextEditor: View {
+    @State var item: QuickText
+    let save: (QuickText) -> Bool
+    @State private var saveFailed = false
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            TextField("名称", text: $item.title)
+            TextEditor(text: $item.text).frame(height: 180)
+            if saveFailed { Text("保存失败，请重试").foregroundStyle(.red) }
+            HStack {
+                Button("取消") { dismiss() }
+                Spacer()
+                Button("保存") {
+                    if save(item) { dismiss() } else { saveFailed = true }
+                }
+                .disabled(item.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || item.text.isEmpty)
+            }
+        }.padding(20).frame(width: 400)
+    }
 }
 struct ExchangeRate:Codable,Identifiable,Sendable {let date:String;let base:String;let quote:String;let rate:Double;var id:String {quote}}
 enum ExchangeRates {
@@ -157,9 +316,10 @@ private struct CurrencyConversionRow:View {
         }.padding(10).background(Color.primary.opacity(0.025),in:RoundedRectangle(cornerRadius:10))
     }
 }
-struct ClockZone:Identifiable {let name:String;let zone:String;var id:String {zone}}
+struct ClockZone:Codable,Identifiable,Equatable {let name:String;let zone:String;var id:String {name+"|"+zone}}
 enum WorldTimes {
     static let zones=[ClockZone(name:"北京",zone:"Asia/Shanghai"),ClockZone(name:"东京",zone:"Asia/Tokyo"),ClockZone(name:"新加坡",zone:"Asia/Singapore"),ClockZone(name:"伦敦",zone:"Europe/London"),ClockZone(name:"巴黎",zone:"Europe/Paris"),ClockZone(name:"纽约",zone:"America/New_York"),ClockZone(name:"洛杉矶",zone:"America/Los_Angeles"),ClockZone(name:"悉尼",zone:"Australia/Sydney")]
+    static let suggested=[ClockZone(name:"香港",zone:"Asia/Hong_Kong"),ClockZone(name:"台北",zone:"Asia/Taipei"),ClockZone(name:"首尔",zone:"Asia/Seoul"),ClockZone(name:"曼谷",zone:"Asia/Bangkok"),ClockZone(name:"迪拜",zone:"Asia/Dubai"),ClockZone(name:"柏林",zone:"Europe/Berlin"),ClockZone(name:"莫斯科",zone:"Europe/Moscow"),ClockZone(name:"温哥华",zone:"America/Vancouver"),ClockZone(name:"旧金山",zone:"America/Los_Angeles"),ClockZone(name:"芝加哥",zone:"America/Chicago"),ClockZone(name:"多伦多",zone:"America/Toronto"),ClockZone(name:"奥克兰",zone:"Pacific/Auckland")]
     static func formatted(_ date:Date,zone:String,format:String="MM-dd HH:mm:ss")->String {let f=DateFormatter();f.locale=Locale(identifier:"zh_CN");f.dateFormat=format;f.timeZone=TimeZone(identifier:zone);return f.string(from:date)}
     static func date(month:Int,day:Int,hour:Int,minute:Int,zone:String,reference:Date=Date())->Date? {
         guard let timeZone=TimeZone(identifier:zone),(1...12).contains(month),(1...31).contains(day),(0...23).contains(hour),(0...59).contains(minute) else {return nil}
@@ -170,32 +330,116 @@ enum WorldTimes {
         guard parts.year == year,parts.month == month,parts.day == day,parts.hour == hour,parts.minute == minute else {return nil};return value
     }
 }
+@MainActor final class WorldClockLibrary:ObservableObject {
+    @Published private(set) var custom:[ClockZone]=[]
+    @Published private(set) var hiddenDefaults:Set<String>=[]
+    private let defaults:UserDefaults
+    private let key="findduck.world-clock.custom-cities"
+    private let hiddenKey="findduck.world-clock.hidden-default-cities"
+    init(defaults:UserDefaults = .standard) {
+        self.defaults=defaults
+        hiddenDefaults=Set(defaults.stringArray(forKey:hiddenKey) ?? [])
+        if let data=defaults.data(forKey:key),let saved=try? JSONDecoder().decode([ClockZone].self,from:data) {
+            custom=saved.filter {TimeZone(identifier:$0.zone) != nil && !$0.name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty}
+        }
+    }
+    var zones:[ClockZone] {WorldTimes.zones.filter {!hiddenDefaults.contains($0.id)}+custom}
+    @discardableResult func add(name:String,zone:String)->Bool {
+        let city=name.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !city.isEmpty,city.count<=40,TimeZone(identifier:zone) != nil,
+              !zones.contains(where:{$0.name.localizedCaseInsensitiveCompare(city) == .orderedSame}) else {return false}
+        custom.append(ClockZone(name:city,zone:zone));persist();return true
+    }
+    func remove(_ city:ClockZone) {
+        guard zones.count > 1 else {return}
+        if WorldTimes.zones.contains(city) {hiddenDefaults.insert(city.id)}
+        else {custom.removeAll {$0.id == city.id}}
+        persist()
+    }
+    private func persist() {
+        if let data=try? JSONEncoder().encode(custom) {defaults.set(data,forKey:key)}
+        defaults.set(hiddenDefaults.sorted(),forKey:hiddenKey)
+    }
+}
 private struct WorldClockView:View {
-    @State private var source="Asia/Shanghai"
-    @State private var target="America/New_York"
+    @StateObject private var library=WorldClockLibrary()
+    @State private var source=WorldTimes.zones[0].id
+    @State private var target=WorldTimes.zones[5].id
+    @State private var adding=false
     @State private var month=""
     @State private var day=""
     @State private var hour=""
     @State private var minute=""
-    private var converted:Date? {guard let m=Int(month),let d=Int(day),let h=Int(hour),let n=Int(minute) else {return nil};return WorldTimes.date(month:m,day:d,hour:h,minute:n,zone:source)}
+    private var sourceZone:String {library.zones.first(where:{$0.id == source})?.zone ?? WorldTimes.zones[0].zone}
+    private var targetZone:String {library.zones.first(where:{$0.id == target})?.zone ?? WorldTimes.zones[5].zone}
+    private var converted:Date? {guard let m=Int(month),let d=Int(day),let h=Int(hour),let n=Int(minute) else {return nil};return WorldTimes.date(month:m,day:d,hour:h,minute:n,zone:sourceZone)}
     var body:some View {
         VStack(alignment:.leading,spacing:14) {
-            TimelineView(.periodic(from:.now,by:1)) {context in
-                LazyVGrid(columns:Array(repeating:GridItem(.flexible()),count:4),spacing:12) {
-                    ForEach(WorldTimes.zones) {zone in
-                        VStack(alignment:.leading,spacing:4) {Text(zone.name).font(.caption).foregroundStyle(.secondary);Text(WorldTimes.formatted(context.date,zone:zone.zone,format:"HH:mm:ss")).font(.system(size:17,weight:.medium)).monospacedDigit();Text(WorldTimes.formatted(context.date,zone:zone.zone,format:"MM月dd日")).font(.caption).foregroundStyle(.secondary)}.frame(maxWidth:.infinity,alignment:.leading).padding(9).background(Color.primary.opacity(0.035),in:RoundedRectangle(cornerRadius:9))
+            HStack {Text("城市时间").font(.system(size:13,weight:.semibold));Spacer();Button {adding=true} label: {Label("增加城市",systemImage:"plus")}}
+            ScrollView {
+                TimelineView(.periodic(from:.now,by:1)) {context in
+                    LazyVGrid(columns:Array(repeating:GridItem(.flexible()),count:4),spacing:10) {
+                        ForEach(library.zones) {zone in
+                            VStack(alignment:.leading,spacing:4) {
+                                HStack(spacing:3) {Text(zone.name).lineLimit(1).font(.caption).foregroundStyle(.secondary);Spacer(minLength:0)
+                                    if library.zones.count > 1 {Button {remove(zone)} label: {Image(systemName:"xmark.circle.fill").foregroundStyle(.secondary)}.buttonStyle(.plain).help("移除城市")}}
+                                Text(WorldTimes.formatted(context.date,zone:zone.zone,format:"HH:mm:ss")).font(.system(size:17,weight:.medium)).monospacedDigit()
+                                Text(WorldTimes.formatted(context.date,zone:zone.zone,format:"MM月dd日")).font(.caption).foregroundStyle(.secondary)
+                            }.frame(maxWidth:.infinity,alignment:.leading).padding(9).background(Color.primary.opacity(0.035),in:RoundedRectangle(cornerRadius:9))
+                                .contextMenu {if library.zones.count > 1 {Button("删除城市",role:.destructive) {remove(zone)}}}
+                        }
                     }
                 }
-            }
+            }.frame(maxHeight:230)
             Divider();Text("时间换算").font(.system(size:13,weight:.semibold))
-            HStack {Picker("从",selection:$source) {ForEach(WorldTimes.zones) {Text($0.name).tag($0.zone)}};Image(systemName:"arrow.right").foregroundStyle(.secondary);Picker("到",selection:$target) {ForEach(WorldTimes.zones) {Text($0.name).tag($0.zone)}}}
+            HStack {Picker("从",selection:$source) {ForEach(library.zones) {Text($0.name).tag($0.id)}};Image(systemName:"arrow.right").foregroundStyle(.secondary);Picker("到",selection:$target) {ForEach(library.zones) {Text($0.name).tag($0.id)}}}
             HStack(spacing:7) {
                 dateField("月份",text:$month);Text("月");dateField("日期",text:$day);Text("日");dateField("小时",text:$hour);Text(":");dateField("分钟",text:$minute);Spacer();Button("现在") {now()}
             }.font(.system(size:13)).monospacedDigit()
-            VStack(alignment:.leading,spacing:5) {Text("换算结果").font(.caption).foregroundStyle(.secondary);Text(converted.map {WorldTimes.formatted($0,zone:target,format:"MM月dd日 HH:mm")} ?? "请输入有效日期和时间").font(.system(size:21,weight:.medium)).monospacedDigit().textSelection(.enabled)}.padding(12).frame(maxWidth:.infinity,alignment:.leading).background(Color.accentColor.opacity(0.07),in:RoundedRectangle(cornerRadius:10))
+            VStack(alignment:.leading,spacing:5) {Text("换算结果").font(.caption).foregroundStyle(.secondary);Text(converted.map {WorldTimes.formatted($0,zone:targetZone,format:"MM月dd日 HH:mm")} ?? "请输入有效日期和时间").font(.system(size:21,weight:.medium)).monospacedDigit().textSelection(.enabled)}.padding(12).frame(maxWidth:.infinity,alignment:.leading).background(Color.accentColor.opacity(0.07),in:RoundedRectangle(cornerRadius:10))
             Text("日期按当前年份计算，自动处理所选时区的夏令时。").font(.caption).foregroundStyle(.secondary)
-        }.onAppear {now()}
+        }.onAppear {now()}.sheet(isPresented:$adding) {AddClockCityView(library:library)}
     }
     private func dateField(_ title:String,text:Binding<String>)->some View {TextField(title,text:text).textFieldStyle(.roundedBorder).frame(width:42).multilineTextAlignment(.center).accessibilityLabel(title)}
-    private func now() {let value=Date();month=WorldTimes.formatted(value,zone:source,format:"MM");day=WorldTimes.formatted(value,zone:source,format:"dd");hour=WorldTimes.formatted(value,zone:source,format:"HH");minute=WorldTimes.formatted(value,zone:source,format:"mm")}
+    private func now() {let value=Date();month=WorldTimes.formatted(value,zone:sourceZone,format:"MM");day=WorldTimes.formatted(value,zone:sourceZone,format:"dd");hour=WorldTimes.formatted(value,zone:sourceZone,format:"HH");minute=WorldTimes.formatted(value,zone:sourceZone,format:"mm")}
+    private func remove(_ zone:ClockZone) {
+        library.remove(zone)
+        if source == zone.id {source=library.zones.first?.id ?? WorldTimes.zones[0].id}
+        if target == zone.id {target=library.zones.last?.id ?? WorldTimes.zones[0].id}
+    }
+}
+private struct AddClockCityView:View {
+    @ObservedObject var library:WorldClockLibrary
+    @Environment(\.dismiss) private var dismiss
+    @State private var name=""
+    @State private var search=""
+    @State private var selected=""
+    @State private var error=""
+    private var matches:[ClockZone] {
+        let query=search.trimmingCharacters(in:.whitespacesAndNewlines)
+        guard !query.isEmpty else {return WorldTimes.suggested}
+        let normalized=query.replacingOccurrences(of:" ",with:"_")
+        let suggestions=WorldTimes.suggested.filter {$0.name.localizedCaseInsensitiveContains(query) || $0.zone.localizedCaseInsensitiveContains(normalized)}
+        let known=TimeZone.knownTimeZoneIdentifiers.filter {identifier in identifier.localizedCaseInsensitiveContains(normalized) && !suggestions.contains(where:{$0.zone == identifier})}
+        return suggestions+known.prefix(max(0,30-suggestions.count)).map {ClockZone(name:$0.split(separator:"/").last.map {String($0).replacingOccurrences(of:"_",with:" ")} ?? $0,zone:$0)}
+    }
+    var body:some View {
+        VStack(alignment:.leading,spacing:12) {
+            Text("增加世界时间城市").font(.headline)
+            TextField("搜索城市或时区，例如：温哥华、Vancouver",text:$search)
+                .accessibilityLabel("搜索城市或时区")
+            Text("先从列表选择城市，Biu会自动匹配时区。").font(.caption).foregroundStyle(.secondary)
+            if !selected.isEmpty {
+                TextField("显示名称（可改）",text:$name).accessibilityLabel("城市显示名称")
+                Text("显示名称只影响卡片文字；实际时间按已选时区 "+selected+" 计算。").font(.caption).foregroundStyle(.secondary)
+            }
+            ScrollView {LazyVStack(spacing:2) {ForEach(matches) {city in
+                Button {selected=city.zone;if name.isEmpty {name=city.name}} label: {
+                    HStack {Text(city.name);Text(city.zone).font(.caption).foregroundStyle(.secondary);Spacer();Text(WorldTimes.formatted(Date(),zone:city.zone,format:"HH:mm")).foregroundStyle(.secondary)}.padding(.horizontal,8).padding(.vertical,5).background(selected == city.zone ? FindDuckHighlight.soft : Color.clear,in:RoundedRectangle(cornerRadius:6))
+                }.buttonStyle(.plain).accessibilityLabel(city.name+"，"+city.zone)
+            }}}.frame(height:210)
+            if !error.isEmpty {Text(error).font(.caption).foregroundStyle(.red)}
+            HStack {Spacer();Button("取消") {dismiss()};Button("添加") {if library.add(name:name,zone:selected) {dismiss()} else {error="请输入城市名称并选择时区；城市名称不能重复。"}}.disabled(name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || selected.isEmpty)}
+        }.padding(20).frame(width:440)
+    }
 }

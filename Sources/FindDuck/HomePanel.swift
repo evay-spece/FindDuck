@@ -7,10 +7,14 @@ struct HomePanel:View {
     @ObservedObject var model:SearchLibrary
     @ObservedObject var hotKeys:HotKeyManager
     @ObservedObject var recentApps:RecentAppLibrary
+    @ObservedObject var clipboard:ClipboardHistoryStore
     @State private var tool:HomeTool?
     @State private var showRecentApps=false
+    @State private var hoveredRecentApp:String?
+    @State private var isFileDropTargeted=false
     @StateObject private var badges=DockBadgeStore()
     @StateObject private var reorder=HomeReorderState()
+    @Environment(\.openWindow) private var openWindow
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     private var reorderAnimation:Animation? {reduceMotion ? nil : .easeInOut(duration:0.18)}
     private let columns=[GridItem(.adaptive(minimum:135,maximum:175),spacing:12)]
@@ -31,19 +35,19 @@ struct HomePanel:View {
                     } label: {Label("添加入口",systemImage:"plus")}.menuStyle(.borderlessButton).fixedSize().accessibilityLabel("添加主页入口")
                 }
                 HStack(spacing:12) {
-                    Button {tool = .snippets} label: {Label("快捷文本",systemImage:"text.quote")}
+                    Button {openWindow(id:"quick-text")} label: {Label("快捷文本",systemImage:"text.quote")}
                     Button {tool = .rates} label: {Label("人民币汇率",systemImage:"yensign.arrow.circlepath")}
                     Button {tool = .world} label: {Label("世界时间",systemImage:"globe")}
+                    Button {openWindow(id:"clipboard")} label: {Label("剪贴板历史",systemImage:"doc.on.clipboard")}
                 }.buttonStyle(.bordered)
                 if !badges.trusted {Button {badges.requestPermission()} label: {Label("开启辅助功能权限以显示软件通知角标",systemImage:"bell.badge")}.buttonStyle(.plain).font(.caption).foregroundStyle(.secondary)}
                 section("常用软件",group:0)
                 section("常用文件",group:3)
-                HomeFileDropArea {urls in for url in urls {_=home.pin(url)}}.frame(height:46)
                 section("常用网站",group:1)
                 section("快捷功能",group:2)
                 if !home.error.isEmpty {Text(home.error).font(.caption).foregroundStyle(.secondary)}
             }.padding(.horizontal,20).padding(.vertical,10)
-        }.accessibilityLabel("找鸭主页").sheet(item:$tool) {tool in QuickToolsPanel(tool:tool)}.task {await badges.watch()}
+        }.accessibilityLabel("Biu主页").sheet(item:$tool) {tool in QuickToolsPanel(tool:tool)}.task {await badges.watch()}
     }
     private var recentApplications:some View {
         let entries=recentApps.visible(excluding:home.items)
@@ -62,6 +66,8 @@ struct HomePanel:View {
                             Button {showRecentApps=false;launch(HomeShortcut(title:entry.name,kind:.application,target:entry.path))} label: {
                                 HStack(spacing:10) {Image(nsImage:NSWorkspace.shared.icon(forFile:entry.path)).resizable().scaledToFit().frame(width:28,height:28);Text(entry.name).font(.system(size:13)).lineLimit(1);Spacer()}.contentShape(Rectangle())
                             }.buttonStyle(.plain).help(entry.path).accessibilityLabel("打开最近App："+entry.name)
+                                .padding(5).background(hoveredRecentApp == entry.path ? FindDuckHighlight.soft : .clear,in:RoundedRectangle(cornerRadius:8))
+                                .onHover {hoveredRecentApp=$0 ? entry.path : nil}
                             Button {_=home.add(title:entry.name,kind:.application,target:entry.path)} label: {Image(systemName:"plus.circle")}.buttonStyle(.plain).foregroundStyle(.secondary).help("固定到常用软件").accessibilityLabel("固定到常用软件："+entry.name)
                         }.padding(.vertical,3)
                     }
@@ -84,6 +90,21 @@ struct HomePanel:View {
                 }.animation(reorderAnimation,value:entries.map(\.id))
             }
         }
+        .onDrop(of:[UTType.fileURL.identifier],isTargeted:group == 3 ? $isFileDropTargeted : nil) {providers in
+            guard group == 3,!providers.isEmpty else {return false}
+            for provider in providers {
+                _=provider.loadObject(ofClass:NSURL.self) {object,_ in
+                    guard let url=object as? URL,url.isFileURL else {return}
+                    Task { @MainActor in _=home.pin(url) }
+                }
+            }
+            return true
+        }
+        .overlay {if group == 3 && isFileDropTargeted {
+            RoundedRectangle(cornerRadius:12).fill(Color.accentColor.opacity(0.16))
+                .overlay {Label("松开以添加到常用文件",systemImage:"plus.circle.fill").font(.headline).padding(12).background(.regularMaterial,in:Capsule())}
+                .allowsHitTesting(false)
+        }}
     }
     private func launch(_ item:HomeShortcut) {
         if item.kind == .action {

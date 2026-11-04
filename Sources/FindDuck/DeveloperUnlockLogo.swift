@@ -30,7 +30,7 @@ final class DeveloperLogoView: NSView {
         wantsLayer = true
         setAccessibilityElement(true)
         setAccessibilityRole(.image)
-        setAccessibilityLabel("找鸭标志")
+        setAccessibilityLabel("Biu标志")
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }

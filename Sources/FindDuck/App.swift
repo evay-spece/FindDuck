@@ -3,6 +3,18 @@ import AppKit
 
 private typealias ViewState<Value> = SwiftUI.State<Value>
 
+private enum QuickEntryVisibility {
+    static let history = 1 << 0
+    static let wechat = 1 << 1
+    static let downloads = 1 << 2
+    static let modified = 1 << 3
+    static let recent = 1 << 4
+    static let shared = 1 << 5
+    static let directories = 1 << 6
+    static let addDirectory = 1 << 7
+    static let all = 0xff
+}
+
 private struct WindowBridge: NSViewRepresentable {
     let ready: (NSWindow) -> Void
     func makeNSView(context: Context) -> NSView {
@@ -16,8 +28,11 @@ private struct WindowBridge: NSViewRepresentable {
 struct SearchPanel: View {
     @ObservedObject var model: SearchLibrary
     @ObservedObject var hotKeys: HotKeyManager
+    @ObservedObject var clipboardKeys: HotKeyManager
+    @ObservedObject var quickTextKeys: HotKeyManager
     @ObservedObject var home:HomeLibrary
     @ObservedObject var recentApps:RecentAppLibrary
+    @ObservedObject var clipboard:ClipboardHistoryStore
     @StateObject private var categoryOrder = CategoryOrder()
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
@@ -28,8 +43,23 @@ struct SearchPanel: View {
     @ViewState private var keyboardTarget:String? = nil
     @ViewState private var previewArmed=false
     @ViewState private var showTags=false
+    @ViewState private var showTagHelp=false
+    @AppStorage("findduckHistoryPlacement") private var historyPlacement=0
+    @AppStorage("findduckQuickEntryVisibility") private var quickEntryVisibility=QuickEntryVisibility.all
+    @AppStorage("findduckDeveloperTagsEnabled") private var tagsEnabled=false
     @ViewState private var tagManagerFile:FileHit?
     @ViewState private var debounce: Task<Void, Never>? = nil
+    @ViewState private var currencyRates: [ExchangeRate] = []
+    @ViewState private var currencyError = false
+
+    private var currencyQuery: (amount: Decimal, from: String, to: String)? {
+        let input = model.query.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+        let prefix = String(input.prefix(3))
+        guard ["RMB", "CNY", "USD"].contains(prefix),
+              let amount = CurrencyMath.amount(String(input.dropFirst(3))) else { return nil }
+        return (amount, prefix == "USD" ? "USD" : "CNY", prefix == "USD" ? "CNY" : "USD")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 13) {
@@ -47,52 +77,55 @@ struct SearchPanel: View {
                 }
                 PanelSearchField(text: $model.query, manager: hotKeys, onSubmit: { openSelection(reveal: $0) }, onMove: { moveSelection($0) }, onDeleteScope: {guard model.scopeTitle != nil else {return false};model.clearScope();return true}, onEscape: escapeSearch,onPreview:previewSelection)
                     .frame(height: 30).help("关键词输入框")
-                if !model.query.isEmpty {
-                    Button { model.query = ""; hotKeys.focusSearchInput() } label: {
-                        Image(systemName: "xmark.circle.fill").foregroundStyle(.tertiary)
-                    }.buttonStyle(.plain).help("关键词清除按钮")
-                }
-                if model.isSearching || model.refreshingQuick { ProgressView().controlSize(.small) }
+                if historyPlacement == 1 && showsQuickEntry(QuickEntryVisibility.history) {historyMenu}
             }
             .padding(.horizontal, 18).padding(.vertical, 16)
-            if let value=DuckCalculator.evaluate(model.query) {
-                Button {NSPasteboard.general.clearContents();NSPasteboard.general.setString(value,forType:.string)} label: {HStack {Image(systemName:"equal.circle");Text(value).font(.system(size:24,weight:.medium)).monospacedDigit();Spacer();Text("回车复制结果").font(.caption).foregroundStyle(.secondary)}.padding(.horizontal,24).padding(.vertical,12)}.buttonStyle(.plain)
+            if model.preferences.calculatorOn, let calculation = DuckCalculator.preview(model.query) {
+                utilityResult(symbol: "plus.forwardslash.minus", value: calculation.value,
+                              detail: calculation.complete ? nil : "继续输入算式",
+                              copyable: calculation.complete)
             }
-            Divider().opacity(0.55)
-            HStack(spacing:12) {
-                Group {
-                    ScrollView(.horizontal) {
-                        HStack(spacing:10) {
-                            Menu {
-                                if model.searchHistory.isEmpty {Text("暂无历史搜索")}
-                                ForEach(model.searchHistory,id:\.self) {term in Button(term) {model.recallSearch(term);hotKeys.focusSearchInput()}}
-                                if !model.searchHistory.isEmpty {Divider();Button("清空历史搜索") {model.clearSearchHistory()}}
-                            } label: {Label("历史搜索",systemImage:"clock.arrow.circlepath").font(.system(size:12)).padding(.horizontal,12).padding(.vertical,6).background(Color.primary.opacity(0.055),in:Capsule())}
-                                .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("历史搜索")
-                            quickEntry("今天微信接收到的文件", scope: .wechat)
-                            quickEntry("今天下载的文件", scope: .downloads)
-                            quickEntry("最近打开文件", scope: .recent).help("仅保留最近50个文件，可在其中继续筛选")
-                            scopeEntry("共享盘",active:model.scopeTitle == "共享盘" && model.directoryScope == nil) {model.toggleShared()}
-                            ForEach(model.directoryShortcuts,id:\.self) {url in
-                                scopeEntry(url.lastPathComponent.isEmpty ? "/" : url.lastPathComponent,active:model.directoryScope == url) {model.toggleDirectory(url)}
-                                    .help(url.path).contextMenu {Button("移除快捷入口") {model.removeDirectoryShortcut(url)}}
-                            }
-                            Button {model.chooseDirectoryShortcut();hotKeys.focusSearchInput()} label: {Label("增加目录",systemImage:"plus")}
-                                .buttonStyle(.plain).foregroundStyle(.secondary).padding(.horizontal,8).accessibilityLabel("增加目录")
-                        }
-                    }.scrollIndicators(.hidden).frame(height:32)
+            if let query = currencyQuery {
+                if let amount = CurrencyMath.convert(query.amount, from: query.from, to: query.to, rates: currencyRates) {
+                    utilityResult(symbol: "arrow.left.arrow.right",
+                                  value: CurrencyMath.formatted(amount) + " " + (query.to == "CNY" ? "RMB" : "USD"),
+                                  detail: currencyRates.first(where: { $0.quote == "USD" })?.date,
+                                  copyable: true)
+                } else {
+                    Label(currencyError ? "暂时无法获取汇率" : "正在获取汇率…", systemImage: "arrow.left.arrow.right")
+                        .foregroundStyle(.secondary).padding(.horizontal, 24).padding(.vertical, 10)
                 }
-                Spacer()
-            }.font(.system(size:11)).padding(.horizontal,20).padding(.vertical,10)
-            if !model.availableAnnotationPaths.isEmpty {tagFilters}
+            }
+            if let link=shoppingLink {HStack(spacing:10) {Image(systemName:"link");Text(link.platform.rawValue+"商品链接");Button(link.url) {if let url=URL(string:link.url) {NSWorkspace.shared.open(url)}}.lineLimit(1).truncationMode(.middle);Spacer();Button("复制 ID") {copyResult(link.productID)};Button("复制链接") {copyResult(link.url)}}.buttonStyle(.bordered).font(.system(size:12)).padding(.horizontal,24).padding(.vertical,9)}
+            if let id=productID {HStack(spacing:12) {Image(systemName:"number");Text("商品 ID："+id);Spacer();Button("复制 ID") {copyResult(id)};Button("复制天猫链接") {copyResult(TmallLinkParser.canonicalLink(for:id))};Button("复制京东链接") {copyResult(TmallLinkParser.canonicalJDLink(for:id))}}.buttonStyle(.bordered).font(.system(size:12)).padding(.horizontal,24).padding(.vertical,9)}
+            Divider().opacity(0.55)
+            if showsQuickEntryRow {
+                QuickEntryFlow(spacing: 8) {
+                    if historyPlacement == 0 && showsQuickEntry(QuickEntryVisibility.history) {historyMenu}
+                    if showsQuickEntry(QuickEntryVisibility.wechat) {quickEntry("今天微信收发的文件", scope: .wechat)}
+                    if showsQuickEntry(QuickEntryVisibility.downloads) {quickEntry("今天下载的文件", scope: .downloads)}
+                    if showsQuickEntry(QuickEntryVisibility.modified) {quickEntry("今天修改的文件", scope: .modified).help("搜索已索引位置中今天修改的文件，可继续按名称和类型筛选")}
+                    if showsQuickEntry(QuickEntryVisibility.recent) {quickEntry("最近打开文件", scope: .recent).help("仅保留最近50个文件，可在其中继续筛选")}
+                    if showsQuickEntry(QuickEntryVisibility.shared) {scopeEntry("共享盘",active:model.scopeTitle == "共享盘" && model.directoryScope == nil) {model.toggleShared()}}
+                    if historyPlacement == 2 && showsQuickEntry(QuickEntryVisibility.history) {historyMenu}
+                    if showsQuickEntry(QuickEntryVisibility.directories) {ForEach(model.directoryShortcuts,id:\.self) {url in
+                        scopeEntry(DisplayPath.name(url),active:model.directoryScope == url) {model.toggleDirectory(url)}
+                            .help(url.path).contextMenu {Button("移除快捷入口") {model.removeDirectoryShortcut(url)}}
+                    }}
+                    if showsQuickEntry(QuickEntryVisibility.addDirectory) {Button {model.chooseDirectoryShortcut();hotKeys.focusSearchInput()} label: {Label("增加目录",systemImage:"plus")}
+                        .buttonStyle(.plain).foregroundStyle(.secondary).padding(.horizontal,8).accessibilityLabel("增加目录")
+                    }
+                }.font(.system(size:11)).padding(.horizontal,20).padding(.vertical,10)
+            }
+            if tagsEnabled && !model.availableAnnotationPaths.isEmpty {tagFilters}
             if !model.isHome {
             HStack(spacing: 5) {
                 ForEach(categoryOrder.categories) { category in
-                    Button { model.category = category; hotKeys.focusSearchInput() } label: {
+                    Button { model.category = category;if category != .all {model.markCondition("category")};hotKeys.focusSearchInput() } label: {
                         Text(category.rawValue).font(.system(size: 12, weight: model.category == category ? .semibold : .regular))
                             .frame(minWidth:48,minHeight:34).padding(.horizontal,3).contentShape(Capsule())
                             .foregroundStyle(model.category == category ? Color.accentColor : Color.secondary)
-                            .background(model.category == category ? Color.accentColor.opacity(0.12) : Color.clear, in: Capsule())
+                            .background(model.category == category ? FindDuckHighlight.soft : Color.clear, in: Capsule())
                     }.buttonStyle(.plain)
                     .help("类型筛选栏 · 拖动可调整分类顺序")
                     .overlay(Capsule().stroke(categoryOrder.dropTarget == category ? Color.accentColor : .clear, lineWidth: 1))
@@ -105,11 +138,16 @@ struct SearchPanel: View {
                     }
                 }
                 Spacer(minLength: 8)
+                if tagsEnabled {Button {showTagHelp=true} label: {Image(systemName:"tag")}.buttonStyle(.plain).font(.system(size:11)).foregroundStyle(.secondary).frame(width:22).help("如何使用标签")
+                    .popover(isPresented:$showTagHelp) {VStack(alignment:.leading,spacing:10) {
+                        Text("用标签整理文件").font(.headline)
+                        Text("右键点击搜索结果，可直接点颜色标签，也可选择「自定义标签…」。同一文件可以加多个标签。")
+                        Text("加过标签后，搜索结果上方会出现对应筛选入口。标签只保存在Biu里。")
+                    }.font(.system(size:12)).frame(width:260,alignment:.leading).padding(16)}}
+                resultModeSwitch
                 Menu {
                     ForEach(ResultSort.allCases) {sort in
-                        Button {model.resultSort=sort;hotKeys.focusSearchInput()} label: {
-                            if model.resultSort == sort {Label(sort.rawValue,systemImage:"checkmark")} else {Text(sort.rawValue)}
-                        }
+                        Toggle(sort.rawValue,isOn:Binding(get:{model.resultSort == sort},set:{if $0 {model.resultSort=sort;hotKeys.focusSearchInput()}}))
                     }
                 } label: {
                     HStack(spacing: 4) { Text(model.resultSort.rawValue); Image(systemName: "arrow.up.arrow.down") }
@@ -122,7 +160,7 @@ struct SearchPanel: View {
             if !categoryOrder.error.isEmpty {Text(categoryOrder.error).font(.caption).foregroundStyle(.red)}
             if !model.status.isEmpty {Text(model.status).font(.caption).foregroundStyle(.secondary).lineLimit(2).padding(.horizontal,20)}
             if model.isHome {
-                HomePanel(home:home,model:model,hotKeys:hotKeys,recentApps:recentApps).frame(maxWidth:.infinity,maxHeight:.infinity)
+                HomePanel(home:home,model:model,hotKeys:hotKeys,recentApps:recentApps,clipboard:clipboard).frame(maxWidth:.infinity,maxHeight:.infinity)
             } else if model.hits.isEmpty {
                 emptyState.frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
@@ -145,12 +183,17 @@ struct SearchPanel: View {
             }
 
         }
-        .background(Color(nsColor: .textBackgroundColor))
+        .background {
+            if #available(macOS 15.0, *) {
+                Color(nsColor: .textBackgroundColor).gesture(WindowDragGesture())
+            } else {
+                Color(nsColor: .textBackgroundColor)
+            }
+        }
         .ignoresSafeArea(.container, edges: .top)
         .frame(minWidth: 700, minHeight: 500)
         .background(WindowBridge { window in
             window.styleMask.insert([.titled, .fullSizeContentView])
-            window.isOpaque = false
             window.backgroundColor = .textBackgroundColor
             window.hasShadow = true
             window.titleVisibility = .hidden
@@ -158,21 +201,33 @@ struct SearchPanel: View {
             window.isMovableByWindowBackground = true
             for kind in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] { window.standardWindowButton(kind)?.isHidden = true }
             hotKeys.searchWindow = window
-            if let screen=window.screen ?? NSScreen.main {
-                let visible=screen.visibleFrame
-                window.setContentSize(NSSize(width:min(760,visible.width-40),height:min(580,visible.height-60)))
-                window.center()
-            }
+            hotKeys.resetSearchFrame(window)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps:true)
         })
         .sheet(item:$tagManagerFile) {file in TagManager(model:model,file:file)}
         .onAppear {
+            if !tagsEnabled {model.clearTagSelection()}
             hotKeys.openSearch = { openWindow(id: "search") }
-            hotKeys.prepareSearch = {elapsed in if HomeLibrary.shouldShowHome(elapsed:elapsed,resumeWindow:home.resumeWindowSeconds) {model.showHome()}}
+            clipboardKeys.openTool = {openWindow(id:"clipboard")}
+            quickTextKeys.openTool = {openWindow(id:"quick-text")}
+            hotKeys.prepareSearch = { elapsed in
+                let reset = HomeLibrary.shouldShowHome(elapsed: elapsed, resumeWindow: home.resumeWindowSeconds)
+                if reset { model.showHome(); selected = nil; hovering = nil; hoveredTag = nil; previewArmed = false }
+                return reset
+            }
             hotKeys.openSettings = { openSettings() }
+            model.didOpenResult = {hotKeys.hideSearch()}
         }
-        .onChange(of: model.query) { _, query in
+        .task(id: currencyQuery != nil) {
+            guard currencyQuery != nil else { return }
+            currencyError = false
+            do { currencyRates = try await ExchangeRates.load() }
+            catch { if !Task.isCancelled { currencyError = true } }
+        }
+        .onChange(of:tagsEnabled) {_,enabled in if !enabled {model.clearTagSelection()}}
+        .onChange(of: model.query) { old, query in
+            if old.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && !query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty {model.markCondition("query")}
             previewArmed=false
             debounce?.cancel()
             if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { if model.isHome { model.clearResults(); selected = nil } else if !model.isSearching { model.search() }; return }
@@ -192,23 +247,47 @@ struct SearchPanel: View {
         }
         .onExitCommand {escapeSearch()}
     }
+    private func showsQuickEntry(_ entry:Int)->Bool {quickEntryVisibility & entry != 0}
+    private var showsQuickEntryRow:Bool {
+        let inSearchField = historyPlacement == 1 ? QuickEntryVisibility.history : 0
+        let rowEntries = quickEntryVisibility & ~inSearchField
+        return rowEntries & ~QuickEntryVisibility.directories != 0 ||
+            (showsQuickEntry(QuickEntryVisibility.directories) && !model.directoryShortcuts.isEmpty)
+    }
     private func quickEntry(_ title: String, scope: QuickScope) -> some View {
         let active = model.quickScope == scope && model.directoryScope == nil
-        return Button { model.toggleQuick(scope); hotKeys.focusSearchInput() } label: {
+        return Button { model.toggleQuick(scope);if model.scopeTitle != nil {model.markCondition("scope")};hotKeys.focusSearchInput() } label: {
             Label(title, systemImage: "magnifyingglass")
                 .font(.system(size: 12, weight: active ? .semibold : .regular))
                 .padding(.horizontal, 12).padding(.vertical, 6)
                 .foregroundStyle(active ? Color.accentColor : Color.primary)
-                .background(active ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.055), in: Capsule())
+                .background(active ? FindDuckHighlight.soft : Color.primary.opacity(0.055), in: Capsule())
         }.buttonStyle(.plain)
         .accessibilityAddTraits(active ? [.isSelected] : [])
     }
+    private var historyMenu:some View {
+        Menu {
+            if model.searchHistory.isEmpty {Text("暂无历史搜索")}
+            ForEach(model.searchHistory,id:\.self) {term in Button(term) {model.recallSearch(term);hotKeys.focusSearchInput()}}
+            if !model.searchHistory.isEmpty {Divider();Button("清空历史搜索") {model.clearSearchHistory()}}
+        } label: {Label("历史搜索",systemImage:"clock.arrow.circlepath").font(.system(size:12)).padding(.horizontal,12).padding(.vertical,6).background(Color.primary.opacity(0.055),in:Capsule())}
+            .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().accessibilityLabel("历史搜索")
+    }
+    private var resultModeSwitch: some View {
+        Toggle("精简结果", isOn: Binding(get: { model.preferences.suppressNoise },
+                                       set: { model.toggleNoise($0) }))
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .font(.system(size: 11))
+            .fixedSize()
+            .help("关闭后显示精简时隐藏的结果。搜索排除规则仍生效。")
+    }
     private func scopeEntry(_ title:String,active:Bool,action:@escaping ()->Void) -> some View {
-        Button {action();hotKeys.focusSearchInput()} label: {
+        Button {action();if model.scopeTitle != nil {model.markCondition("scope")};hotKeys.focusSearchInput()} label: {
             Label(title,systemImage:"magnifyingglass").font(.system(size:12,weight:active ? .semibold : .regular))
                 .padding(.horizontal,12).padding(.vertical,6)
                 .foregroundStyle(active ? Color.accentColor : Color.primary)
-                .background(active ? Color.accentColor.opacity(0.12) : Color.primary.opacity(0.055),in:Capsule())
+                .background(active ? FindDuckHighlight.soft : Color.primary.opacity(0.055),in:Capsule())
         }.buttonStyle(.plain).accessibilityAddTraits(active ? [.isSelected] : [])
     }
     private var footer: String {
@@ -222,7 +301,7 @@ struct SearchPanel: View {
         VStack(spacing: 14) {
             Image(systemName: model.query.isEmpty ? "magnifyingglass" : "doc.text.magnifyingglass")
                 .font(.system(size: 38, weight: .light)).foregroundStyle(.tertiary)
-            Text(model.isSearching ? "正在搜索…" : (model.quickScope == .downloads || model.quickScope == .wechat) ? "今天没有找到符合条件的文件" : !model.hasIndex && !model.sources.isEmpty ? "正在载入或建立索引…" : !model.hasIndex ? "添加本地或共享盘文件夹" : model.quickScope == .recent ? "暂无匹配的最近打开记录" : model.isHome ? "输入文件名开始搜索" : "没有找到匹配结果")
+            Text((model.quickScope == .downloads || model.quickScope == .wechat || model.quickScope == .modified) ? "没有找到符合条件的文件" : !model.hasIndex && !model.sources.isEmpty ? "正在载入或建立索引…" : !model.hasIndex ? "添加本地或共享盘文件夹" : model.quickScope == .recent ? "暂无匹配的最近打开记录" : model.isHome ? "输入文件名开始搜索" : "没有找到匹配结果")
                 .font(.system(size: 15, weight: .medium)).foregroundStyle(.secondary)
             if !model.hasIndex {
                 SettingsLink { Text("打开设置") }.buttonStyle(.bordered)
@@ -240,11 +319,11 @@ struct SearchPanel: View {
                 .accessibilityLabel(file.isDirectory ? "文件夹" : "默认打开软件图标")
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing:6) {
-                    HighlightedName(name:file.name,query:model.query).frame(height:18)
-                    ForEach(model.tags(file)) {tag in trackedTag(tag,file:file)}
-                    if let note=model.preferences.fileNotes?[file.id],!note.isEmpty {trackedTag(FileTag(id:"note",name:note,color:.gray),file:file)}
+                    HighlightedName(name:isInstalledApplication(file) ? file.url.deletingPathExtension().lastPathComponent : file.name,query:model.query,fontSize:isInstalledApplication(file) ? 16 : 13).frame(height:isInstalledApplication(file) ? 21 : 18)
+                    if tagsEnabled {ForEach(model.tags(file)) {tag in trackedTag(tag,file:file)}
+                    if let note=model.preferences.fileNotes?[file.id],!note.isEmpty {trackedTag(FileTag(id:"note",name:note,color:.gray),file:file)}}
                 }
-                HStack(spacing:4) {Image(systemName:model.sources.contains(where:{$0.kind == .shared && DuckRules.under(file.url,$0.url)}) ? "network" : file.url.path.contains("/msg/file/") ? "bubble.left.and.bubble.right" : "internaldrive");Text(DisplayPath.parent(file.url)).lineLimit(1).truncationMode(.middle)}.font(.system(size:11)).foregroundStyle(.secondary).help(file.url.deletingLastPathComponent().path)
+                if !isInstalledApplication(file) {HStack(spacing:4) {Image(systemName:model.sources.contains(where:{$0.kind == .shared && DuckRules.under(file.url,$0.url)}) ? "network" : file.url.path.contains("/msg/file/") ? "bubble.left.and.bubble.right" : "internaldrive");Text(DisplayPath.parent(file.url)).lineLimit(1).truncationMode(.middle)}.font(.system(size:11)).foregroundStyle(.secondary).help(file.url.deletingLastPathComponent().path)}
             }
             Spacer(minLength: 16)
             VStack(alignment:.trailing,spacing:4) {
@@ -254,7 +333,7 @@ struct SearchPanel: View {
             }
         }
         .padding(.horizontal, 14).padding(.vertical, 9)
-        .background(selected == file.id ? Color.accentColor.opacity(0.30) : hovering == file.id ? Color.accentColor.opacity(0.065) : .clear, in: RoundedRectangle(cornerRadius: 9))
+        .background(selected == file.id ? FindDuckHighlight.selected : hovering == file.id ? FindDuckHighlight.hover : .clear, in: RoundedRectangle(cornerRadius: 22))
         .coordinateSpace(name:file.id)
         .onPreferenceChange(TagRegionKey.self) {value in if tagRegions[file.id] != value[file.id] {tagRegions[file.id]=value[file.id]}}
         .contentShape(Rectangle())
@@ -262,13 +341,17 @@ struct SearchPanel: View {
             ImmediateResultClick(select:{previewArmed=true;guard selected != file.id else {return};var transaction=Transaction();transaction.disablesAnimations=true;withTransaction(transaction) {selected=file.id}},hover:{point in
                 if let point {hovering=file.id;let match=tagRegions[file.id]?.first(where:{$0.value.contains(point)}).map {file.id+"|"+$0.key};if hoveredTag != match {hoveredTag=match}}
                 else if hovering == file.id {hovering=nil;hoveredTag=nil}
-            },open:{reveal in if reveal {model.reveal(file)} else {model.open(file)}},menu:{fileMenu(file)})
+            },open:{reveal in openResult(file,reveal:reveal)},menu:{fileMenu(file)})
         }
     }
     private func trackedTag(_ tag:FileTag,file:FileHit)->some View {
-        TagBadge(tag:tag,highlighted:hoveredTag == file.id+"|"+tag.id)
+        TagBadge(tag:tag,highlighted:selected == file.id || hoveredTag == file.id+"|"+tag.id)
+            .fixedSize(horizontal: true, vertical: false)
+            .layoutPriority(1)
+            .zIndex(1)
             .background(GeometryReader {proxy in Color.clear.preference(key:TagRegionKey.self,value:[file.id:[tag.id:proxy.frame(in:.named(file.id))]])})
     }
+    private func isInstalledApplication(_ file:FileHit)->Bool {file.url.pathExtension.lowercased() == "app" && ["/Applications/","/System/Applications/","/System/Library/CoreServices/","/System/Volumes/Preboot/Cryptexes/App/System/Applications/"].contains(where:file.url.path.hasPrefix)}
     @ViewBuilder private var selectedActions:some View {
         if let file=model.hits.first(where:{$0.id == selected}) {
             HStack(spacing:12) {
@@ -283,18 +366,31 @@ struct SearchPanel: View {
     }
     private func fileMenu(_ file:FileHit)->NSMenu {
         let menu=NSMenu()
-        menu.addItem(ResultMenus.item("打开") {model.open(file)})
-        menu.addItem(ResultMenus.item("在 Finder 中显示") {model.reveal(file)})
+        menu.addItem(ResultMenus.item("打开") {openResult(file,reveal:false)})
+        menu.addItem(ResultMenus.item("在 Finder 中显示") {openResult(file,reveal:true)})
         menu.addItem(ResultMenus.item("添加到首页常用文件") {_=home.pin(file.url)})
         menu.addItem(ResultMenus.item("复制路径") {NSPasteboard.general.clearContents();NSPasteboard.general.setString(file.url.path,forType:.string)})
         menu.addItem(.separator())
-        let palette=NSMenuItem();palette.view=TagColorPalette(selected:{Set(model.tags(file).filter {$0.name.isEmpty}.map(\.color))},toggle:{model.toggleTag(file,FileTag.builtin($0))});menu.addItem(palette)
-        for tag in model.preferences.customTags ?? [] {
-            let item=NSMenuItem();item.view=NamedTagMenuView(tag:tag,selected:{model.hasTag(file,tag)},toggle:{model.toggleTag(file,tag)});menu.addItem(item)
+        if tagsEnabled {let palette=NSMenuItem();palette.view=TagColorPalette(colors:[.red,.orange,.yellow,.green,.purple],selected:{Set(model.tags(file).filter {$0.name.isEmpty}.map(\.color))},toggle:{model.toggleTag(file,FileTag.builtin($0))});menu.addItem(palette)
+        if let tags=model.preferences.customTags,!tags.isEmpty {
+            let item=NSMenuItem();item.view=NamedTagsMenuView(tags:tags,selected:{model.hasTag(file,$0)},toggle:{model.toggleTag(file,$0)});menu.addItem(item)
         }
-        menu.addItem(ResultMenus.item("自定义标签…") {tagManagerFile=file})
+        menu.addItem(ResultMenus.item("自定义标签…") {tagManagerFile=file})}
         menu.addItem(ResultMenus.item("备注…") {model.chooseNote(file)})
-        menu.addItem(ResultMenus.item("屏蔽此文件") {model.blockFile(file)})
+        let block = ResultMenus.item(file.isDirectory ? "排除此文件夹及其内容…" : "隐藏此文件") {
+            if file.isDirectory {
+                let alert = NSAlert()
+                alert.messageText = "排除此文件夹及其内容？"
+                alert.informativeText = "这个文件夹及其中的文件将从搜索中排除。可在「设置 → 搜索排除」里恢复。"
+                alert.addButton(withTitle: "取消")
+                alert.addButton(withTitle: "排除")
+                if alert.runModal() == .alertSecondButtonReturn { model.addBlacklist(file.url) }
+            } else {
+                model.blockFile(file)
+            }
+        }
+        block.image = NSImage(systemSymbolName: "eye.slash", accessibilityDescription: nil)
+        menu.addItem(block)
         menu.addItem(ResultMenus.item("快速预览") {FilePreview.shared.show(file)})
         menu.addItem(.separator())
         let trash=ResultMenus.item("移到废纸篓…") {model.requestTrash(file)};trash.image=NSImage(systemSymbolName:"trash",accessibilityDescription:nil);menu.addItem(trash)
@@ -303,9 +399,8 @@ struct SearchPanel: View {
     @ViewBuilder private var tagFilters:some View {
         ScrollView(.horizontal) {
             HStack(spacing:8) {
-                Button {model.tagFilter=model.tagFilter == "*" ? nil : "*";hotKeys.focusSearchInput()} label: {Text("所有标签").font(.system(size:12)).padding(.horizontal,12).frame(height:30).background(model.tagFilter == "*" ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.045),in:Capsule()).foregroundStyle(model.tagFilter == "*" ? Color.accentColor : .secondary)}.buttonStyle(.plain)
                 ForEach(model.visibleTags) {tag in
-                    Button {model.tagFilter=model.tagFilter == tag.id ? nil : tag.id;hotKeys.focusSearchInput()} label: {HStack(spacing:5) {TagBadge(tag:tag)}.padding(.horizontal,8).frame(height:30).background(model.tagFilter == tag.id ? Color.accentColor.opacity(0.12) : Color.clear,in:Capsule()).contentShape(Capsule())}.buttonStyle(.plain).help(tag.displayName)
+                    Button {model.toggleTagSelection(tag.id);hotKeys.focusSearchInput()} label: {HStack(spacing:5) {TagBadge(tag:tag)}.padding(.horizontal,8).frame(height:30).background(model.selectedTagIDs.contains(tag.id) ? FindDuckHighlight.soft : Color.clear,in:Capsule()).contentShape(Capsule())}.buttonStyle(.plain).help(tag.displayName)
                 }
             }
         }.scrollIndicators(.hidden).frame(height:32).padding(.horizontal,20).padding(.bottom,6)
@@ -320,71 +415,134 @@ struct SearchPanel: View {
         keyboardTarget=selected
     }
     private func openSelection(reveal: Bool) {
-        if !reveal,let value=DuckCalculator.evaluate(model.query) {NSPasteboard.general.clearContents();NSPasteboard.general.setString(value,forType:.string);return}
         guard let file = model.hits.first(where: { $0.id == selected }) ?? model.hits.first else { model.search(); return }
-        if reveal { model.reveal(file) } else { model.open(file) }
+        openResult(file,reveal:reveal)
     }
+    private func openResult(_ file:FileHit,reveal:Bool) {
+        if reveal {model.reveal(file)} else {model.open(file)}
+    }
+    private func utilityResult(symbol: String, value: String, detail: String?, copyable: Bool) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: symbol)
+            Text(value).font(.system(size: 24, weight: .medium)).monospacedDigit()
+            if let detail { Text(detail).font(.caption).foregroundStyle(.secondary) }
+            Spacer()
+            Button("复制结果") { copyResult(value) }
+                .buttonStyle(.bordered).disabled(!copyable)
+        }.padding(.horizontal, 24).padding(.vertical, 12)
+    }
+
+    private func copyResult(_ value:String) {NSPasteboard.general.clearContents();NSPasteboard.general.setString(value,forType:.string)}
+    private var shoppingLink:CleanedProductLink? {guard model.preferences.linkCleanerOn, model.query.range(of:#"[a-z]"#,options:.regularExpression) != nil else {return nil};return try? TmallLinkParser.analyze(model.query)}
+    private var productID:String? {guard model.preferences.idToLinkOn else {return nil};let value=model.query.trimmingCharacters(in:.whitespacesAndNewlines);return value.range(of:#"^[0-9]{5,20}$"#,options:.regularExpression) == nil ? nil : value}
 }
 
 struct SearchSettings: View {
+    @ObservedObject var updates: AppUpdates
     @ObservedObject var model: SearchLibrary
     @ObservedObject var hotKeys: HotKeyManager
+    @ObservedObject var secondaryKeys: HotKeyManager
+    @ObservedObject var clipboardKeys:HotKeyManager
+    @ObservedObject var quickTextKeys:HotKeyManager
+    @ObservedObject var clipboard:ClipboardHistoryStore
+    @AppStorage("findduckClipboardCopyFeedback") private var copyFeedback = ClipboardCopyFeedback.center
+    @ViewState private var confirmClearClipboard = false
     @ObservedObject var home:HomeLibrary
     @AppStorage("findduckDeveloperEntryVisibleV1") private var developerEntryVisible = false
-    @ViewState private var selectedSettingsTab = "locations"
+    @AppStorage("findduckHistoryPlacement") private var historyPlacement=0
+    @AppStorage("findduckQuickEntryVisibility") private var quickEntryVisibility=QuickEntryVisibility.all
+    @AppStorage("findduckDeveloperTagsEnabled") private var tagsEnabled=false
+    @ViewState private var selectedSettingsTab = "search"
     var body: some View {
         TabView(selection: $selectedSettingsTab) {
-            connection.tabItem { Label("搜索位置", systemImage: "externaldrive.connected.to.line.below") }.tag("locations")
             searchOptions.tabItem {Label("搜索",systemImage:"magnifyingglass")}.tag("search")
-            indexing.tabItem { Label("索引", systemImage: "list.bullet.rectangle") }.tag("indexing")
-            exclusions.tabItem {Label("黑名单",systemImage:"folder.badge.minus")}.tag("exclusions")
+            exclusions.tabItem {Label("搜索排除",systemImage:"folder.badge.minus")}.tag("exclusions")
             keyboard.tabItem { Label("快捷键", systemImage: "keyboard") }.tag("keyboard")
+            clipboardOptions.tabItem { Label("剪贴板", systemImage: "doc.on.clipboard") }.tag("clipboard")
             about.tabItem { Label("关于", systemImage: "info.circle") }.tag("about")
             if developerEntryVisible {
                 developer.tabItem { Label("开发者", systemImage: "hammer") }.tag("developer")
             }
         }.padding(18).frame(width: 610, height: 440)
-            .onDisappear { hotKeys.cancelRecording() }
+            .onAppear { if updates.aboutRequest > 0 { selectedSettingsTab = "about" } }
+            .onChange(of: updates.aboutRequest) { selectedSettingsTab = "about" }
+            .onDisappear { hotKeys.cancelRecording();secondaryKeys.cancelRecording();clipboardKeys.cancelRecording();quickTextKeys.cancelRecording() }
     }
-    private var connection: some View {
-        Form {
+    @ViewBuilder private var indexControls: some View {
             Section("搜索位置") {
                 ForEach(model.sources) { source in
                     HStack(alignment: .top) {
                         Image(systemName: source.kind == .local ? "internaldrive" : "network")
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(source.url.lastPathComponent).fontWeight(.medium)
-                            Text(source.url.path).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                            Text(model.summary(source)).font(.caption).foregroundStyle(.secondary)
+                            Text(source.url.path == "/" ? "全盘搜索" : WechatLocations.isContainer(source.url) ? "微信收发文件" : DisplayPath.name(source.url)).fontWeight(.medium)
+                            if source.url.path != "/" {Text(DisplayPath.localized(source.url)).help(source.url.path).font(.caption).foregroundStyle(.secondary).lineLimit(2)}
+                            Text(source.url.path == "/" ? "已包含下载等普通文件夹；系统目录和用户资源库按索引设置排除。"+model.summary(source) : WechatLocations.isContainer(source.url) ? "只索引聊天收发文件、可直接打开的图片和视频；排除缓存、数据库、备份与无法按原名搜索的加密 .dat 图片。"+model.summary(source) : model.summary(source)).font(.caption).foregroundStyle(.secondary)
                         }
                         Spacer()
-                        Picker("类型", selection: Binding(get: { source.kind }, set: { model.setKind(source, $0) })) {
-                            ForEach(SourceKind.allCases) { Text($0.rawValue).tag($0) }
-                        }.labelsHidden().frame(width: 85)
+                        if source.kind == .shared {Text("共享盘").font(.caption).foregroundStyle(.secondary).frame(width:50)}
                         Button("移除") { model.remove(source) }.help("只移出搜索范围，不删除文件")
                     }
                 }
                 HStack {
                     Button("完成磁盘授权") { model.diskAuthorization() }
-                    Button("选择已授权磁盘…") { model.chooseAuthorizedDisk() }
                     Button("添加共享盘文件夹…") { model.chooseFolder(kind: .shared) }
                 }
-                Text("仅搜索已添加的位置；移除不会删除文件。共享盘先在 Finder 连接，再从上方添加。微信文件位置自动识别。")
+                Text("本地磁盘自动加入搜索范围；授权后重启Biu会重新核对索引。共享盘先在 Finder 连接，再从上方添加。微信文件位置自动识别。")
                     .font(.caption).foregroundStyle(.secondary)
             }
-        }.formStyle(.grouped)
+            Section("文件名索引") {
+                Text(model.indexSummary).foregroundStyle(.secondary)
+                Toggle("自动更新索引",isOn:$model.autoUpdate)
+                Text("本地监听文件变化并补齐历史事件；共享盘按目录分批检查。")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.isIndexing {
+                    HStack {ProgressView().controlSize(.small);Text("已扫描 \(model.scanned) 个文件 / \(model.scannedDirectories) 个目录");Spacer();Button("停止") {model.cancelIndex()}}
+                } else {
+                    Button(model.hasIndex ? "立即完整核对" : "建立文件名索引") {model.buildIndex()}.disabled(model.folder == nil)
+                }
+            }
     }
     private var searchOptions:some View {
         Form {
+            indexControls
+            Section("搜索框工具") {
+                Toggle("计算功能",isOn:Binding(get:{model.preferences.calculatorOn},set:{model.preferences.calculatorEnabled=$0;model.savePreferences()}))
+                Toggle("商品链接工具", isOn: Binding(get: { model.preferences.productLinksOn }, set: {
+                    model.preferences.productLinksEnabled = $0
+                    model.savePreferences()
+                }))
+            }
             Section("主页") {
-                Picker("短时间保留搜索",selection:$home.resumeWindowSeconds) {
+                Picker("保留上次窗口状态",selection:$home.resumeWindowSeconds) {
                     Text("30 秒").tag(30.0);Text("2 分钟").tag(120.0);Text("5 分钟").tag(300.0);Text("10 分钟").tag(600.0)
                 }
-                Text("在这段时间内再次呼出会保留上次搜索，超过后显示主页。主页入口可自行添加、重命名、移除和调整顺序。").font(.caption).foregroundStyle(.secondary)
+                Text("在这段时间内恢复窗口的位置、大小、搜索条件和光标。超过后以默认大小和位置打开主页。").font(.caption).foregroundStyle(.secondary)
             }
-            Section("搜索过滤") {
-                Toggle("不搜索疑似系统文件",isOn:Binding(get:{model.preferences.suppressNoise},set:{model.toggleNoise($0)}))
-                Text("隐藏系统路径、长十六进制、UUID 及部分长随机名称；关闭后可查找被误判的文件。").font(.caption).foregroundStyle(.secondary)
+            Section("结果精简") {
+                Toggle("精简结果", isOn: Binding(get: { model.preferences.suppressNoise },
+                                               set: { model.toggleNoise($0) }))
+                Text("精简时隐藏疑似系统或随机命名的项目，以及下方选中的扩展名。关闭精简后可查看这些结果。")
+                    .font(.caption).foregroundStyle(.secondary)
+                Text("精简时隐藏的扩展名").font(.caption.weight(.medium))
+                LazyVGrid(columns: [GridItem(.adaptive(minimum: 74))], alignment: .leading, spacing: 6) {
+                    ForEach(DuckPreferences.normalHiddenExtensions, id: \.self) { ext in
+                        let hidden = model.preferences.effectiveHiddenExtensions.contains(ext)
+                        Button {
+                            var values = model.preferences.effectiveHiddenExtensions
+                            if hidden { values.remove(ext) } else { values.insert(ext) }
+                            model.preferences.hiddenExtensions = values.sorted()
+                            model.savePreferences()
+                            model.search()
+                        } label: {
+                            Text(".\(ext)").font(.caption)
+                                .padding(.horizontal, 9).padding(.vertical, 5)
+                                .foregroundStyle(hidden ? Color.accentColor : Color.secondary)
+                                .background(hidden ? FindDuckHighlight.soft : Color.primary.opacity(0.06), in: Capsule())
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(hidden ? .isSelected : [])
+                    }
+                }
             }
             Section("共享盘深度搜索") {
                 TextField("关键词",text:$model.query)
@@ -392,53 +550,49 @@ struct SearchSettings: View {
                 Text("直接遍历已添加的共享盘目录查找文件名。目录范围仍生效，搜索期间可停止。").font(.caption).foregroundStyle(.secondary)
                 if !model.deepStatus.isEmpty {Text(model.deepStatus).font(.caption).foregroundStyle(.secondary)}
             }
-            Section("文件操作") {Text("标签只保存在找鸭，支持同一文件添加多个颜色和文字标签。删除使用废纸篓；不支持废纸篓的磁盘不会改用永久删除。").font(.caption).foregroundStyle(.secondary)}
-        }.formStyle(.grouped)
-    }
-    private var indexing: some View {
-        Form {
-            Section("文件名索引") {
-                Text(model.indexSummary).foregroundStyle(.secondary)
-                Toggle("自动更新索引", isOn: $model.autoUpdate)
-                Text("本地由 Oil Find 核心监听文件变化，并在重启后补齐历史事件；共享盘按目录分批检查，变化发现存在延迟。")
-                    .font(.caption).foregroundStyle(.secondary)
-                if model.isIndexing {
-                    HStack { ProgressView().controlSize(.small); Text("已扫描 \(model.scanned) 个文件 / \(model.scannedDirectories) 个目录"); Spacer(); Button("停止") { model.cancelIndex() } }
-                } else {
-                    Button(model.hasIndex ? "立即完整核对" : "建立文件名索引") { model.buildIndex() }.disabled(model.folder == nil)
-                }
-            }
-            Section("后台状态") {
-                Text(model.indexStatus.isEmpty ? "等待添加搜索位置。" : model.indexStatus).foregroundStyle(.secondary)
-                if !model.coverage.isEmpty { Text(model.coverage).font(.caption).foregroundStyle(.secondary) }
-            }
-            Section { Text("仅索引文件名和路径，保存在此 Mac。默认跳过隐藏文件、符号链接及不必要的本地目录；应用和文档包仅收录本身。").font(.caption).foregroundStyle(.secondary) }
+            Section("文件操作") {Text("标签只保存在Biu，支持同一文件添加多个颜色和文字标签。删除使用废纸篓；不支持废纸篓的磁盘不会改用永久删除。").font(.caption).foregroundStyle(.secondary)}
         }.formStyle(.grouped)
     }
     private var exclusions: some View {
         Form {
-            Section("不搜索以下文件夹及其子目录") {
-                if model.preferences.blacklist.isEmpty { Text("暂无自定义黑名单").foregroundStyle(.secondary) }
+            Section("排除的文件夹") {
+                if model.preferences.blacklist.isEmpty { Text("暂无排除的文件夹").foregroundStyle(.secondary) }
                 ForEach(model.preferences.blacklist,id:\.path) {url in
-                    HStack {Text(url.path).font(.caption).textSelection(.enabled);Spacer();Button("移出黑名单") {model.removeBlacklist(url)}}
+                    HStack {Text(url.path).font(.caption).textSelection(.enabled);Spacer();Button("取消排除") {model.removeBlacklist(url)}}
                 }
-                Button("添加黑名单文件夹…") {model.chooseBlacklist()}
-                Text("管理你自行排除的文件夹及其子目录。只影响扫描与搜索，不会删除原文件。").font(.caption).foregroundStyle(.secondary)
+                Button("添加文件夹…") {model.chooseBlacklist()}
+                Text("排除这些文件夹及其子目录，适用于所有搜索。").font(.caption).foregroundStyle(.secondary)
             }
-            Section("屏蔽的文件") {
-                ForEach(Array(model.preferences.blockedFiles ?? []).sorted(),id:\.self) {path in HStack {Text(path).font(.caption).lineLimit(2);Spacer();Button("取消屏蔽") {model.unblockFile(path)}}}
+            Section("隐藏的单项") {
+                ForEach(Array(model.preferences.blockedFiles ?? []).sorted(),id:\.self) {path in HStack {Text(path).font(.caption).lineLimit(2);Spacer();Button("取消隐藏") {model.unblockFile(path)}}}
             }
-            Section {Text("最近打开排序结合 macOS 已记录的最近使用时间与找鸭成功打开的记录。系统未记录或未索引的文件无法取得使用时间。").font(.caption).foregroundStyle(.secondary)}
+
         }.formStyle(.grouped)
     }
     private var about: some View {
         ScrollView {
             VStack(spacing: 14) {
                 DeveloperUnlockLogo { developerEntryVisible = true }.frame(width: 72, height: 72)
-                Text("找鸭").font(.system(size: 24, weight: .semibold))
+                Text("BIU——！！").font(.system(size: 24, weight: .semibold))
                 Text("本地与共享盘文件搜索").font(.callout).foregroundStyle(.secondary)
                 Text("版本 \(appVersion) · 构建 \(appBuild)").font(.caption).foregroundStyle(.secondary)
                 Text("本地索引与搜索基于 Oil Find 开源核心（MIT）").font(.caption).foregroundStyle(.secondary)
+                Button {
+                    Task { await updates.check(manual: true) }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text(updates.checking ? "正在检查…" : "检查更新")
+                        if updates.hasSmallUpdate { Circle().fill(.red).frame(width: 7, height: 7) }
+                    }
+                }
+                .disabled(updates.checking)
+                .accessibilityHint(updates.hasSmallUpdate ? "有小版本更新" : "")
+                if let release = updates.release {
+                    Link("查看 Biu \(release.version) 更新", destination: release.page)
+                }
+                if !updates.status.isEmpty {
+                    Text(updates.status).font(.caption).foregroundStyle(.secondary)
+                }
                 Button("界面组件说明") {if let url=Bundle.main.url(forResource:"找鸭-界面组件说明",withExtension:"txt") {NSWorkspace.shared.open(url)}}
                 Button("开源许可证") {if let url=Bundle.main.url(forResource:"OilFind-LICENSE",withExtension:"txt") {NSWorkspace.shared.open(url)}}
                 Divider()
@@ -447,15 +601,18 @@ struct SearchSettings: View {
                     LabeledContent("当前快捷键", value: hotKeys.settings.enabled ? hotKeys.settings.display : "已停用")
                     LabeledContent("搜索范围", value: "\(model.sources.count) 个位置")
                     Text("索引和设置保存在这台 Mac，文件名搜索不上传文件内容。共享盘文件需连接后打开。").font(.caption).foregroundStyle(.secondary)
+                    Text("索引状态").font(.caption.weight(.medium))
+                    Text(model.indexStatus.isEmpty ? "等待添加搜索位置。" : model.indexStatus).font(.caption).foregroundStyle(.secondary)
+                    if !model.coverage.isEmpty { Text(model.coverage).font(.caption).foregroundStyle(.secondary) }
                     Text("索引保存位置").font(.caption.weight(.medium))
-                    Text(indexStorage.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(DisplayPath.localized(indexStorage)).help(indexStorage.path).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
                 }.font(.callout).frame(maxWidth: .infinity, alignment: .leading)
                 HStack {
                     Button("打开索引文件夹") { NSWorkspace.shared.open(indexStorage) }
                         .disabled(!FileManager.default.fileExists(atPath: indexStorage.path))
                     Button("复制版本信息") {
                         NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString("找鸭 \(appVersion) (\(appBuild)) · \(ProcessInfo.processInfo.operatingSystemVersionString)", forType: .string)
+                        NSPasteboard.general.setString("Biu \(appVersion) (\(appBuild)) · \(ProcessInfo.processInfo.operatingSystemVersionString)", forType: .string)
                     }
                 }.padding(.top, 3)
             }.padding(22)
@@ -463,6 +620,25 @@ struct SearchSettings: View {
     }
     private var developer: some View {
         Form {
+            Section("界面试验") {
+                Picker("历史搜索位置",selection:$historyPlacement) {Text("快捷入口最前").tag(0);Text("搜索框右侧").tag(1);Text("快捷入口末尾").tag(2)}
+            }
+            Section("标签试验") {
+                Toggle("启用标签功能",isOn:Binding(get:{tagsEnabled},set:{tagsEnabled=$0;if !$0 {model.clearTagSelection()}}))
+                Text("默认关闭。开启后可在搜索结果右键菜单添加颜色或文字标签。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Section("快捷入口显示") {
+                Toggle("历史搜索",isOn:quickEntryOption(QuickEntryVisibility.history))
+                Toggle("今天微信收发的文件",isOn:quickEntryOption(QuickEntryVisibility.wechat))
+                Toggle("今天下载的文件",isOn:quickEntryOption(QuickEntryVisibility.downloads))
+                Toggle("今天修改的文件",isOn:quickEntryOption(QuickEntryVisibility.modified))
+                Toggle("最近打开文件",isOn:quickEntryOption(QuickEntryVisibility.recent))
+                Toggle("共享盘",isOn:quickEntryOption(QuickEntryVisibility.shared))
+                Toggle("已添加的目录",isOn:quickEntryOption(QuickEntryVisibility.directories))
+                Toggle("增加目录",isOn:quickEntryOption(QuickEntryVisibility.addDirectory))
+                Text("只控制入口显示；已经选中的搜索范围仍会显示在搜索框里，可以从那里清除。").font(.caption).foregroundStyle(.secondary)
+            }
             Section("运行状态") {
                 LabeledContent("版本", value: "\(appVersion)（\(appBuild)）")
                 LabeledContent("本地内核",value:"OilFindCore（MIT）")
@@ -481,8 +657,8 @@ struct SearchSettings: View {
                 Toggle("扫描应用和文档包内部", isOn: localOption(\.indexPackageContents))
                 Text("调整后重新核对本地索引；两套黑名单仍优先生效。共享盘保持原扫描策略。").font(.caption).foregroundStyle(.secondary)
             }
-            Section("开发者黑名单") {
-                Text("与用户黑名单同时生效；隐藏开发者入口后仍继续排除这些文件夹及其子目录。").font(.caption).foregroundStyle(.secondary)
+            Section("内置目录排除") {
+                Text("与用户添加的目录排除规则同时生效。").font(.caption).foregroundStyle(.secondary)
                 ForEach(model.preferences.developerBlacklist ?? [], id: \.path) { url in
                     HStack {
                         Text(url.path).font(.caption).textSelection(.enabled)
@@ -490,7 +666,7 @@ struct SearchSettings: View {
                         Button("移除") { model.removeBlacklist(url, developer:true) }
                     }
                 }
-                Button("添加开发者黑名单文件夹…") { model.chooseBlacklist(developer:true) }
+                Button("添加内置排除目录…") { model.chooseBlacklist(developer:true) }
             }
             Section("本机诊断") {
                 Text(model.indexStatus.isEmpty ? "暂无索引状态" : model.indexStatus).font(.caption).textSelection(.enabled)
@@ -514,8 +690,13 @@ struct SearchSettings: View {
             options[keyPath:keyPath]=enabled;model.setLocalOptions(options)
         })
     }
+    private func quickEntryOption(_ entry:Int)->Binding<Bool> {
+        Binding(get:{quickEntryVisibility & entry != 0},set:{enabled in
+            if enabled {quickEntryVisibility |= entry} else {quickEntryVisibility &= ~entry}
+        })
+    }
     private var diagnosticText: String {
-        ["找鸭 \(appVersion)（\(appBuild)）", ProcessInfo.processInfo.operatingSystemVersionString,
+        ["Biu \(appVersion)（\(appBuild)）", ProcessInfo.processInfo.operatingSystemVersionString,
          "索引中：\(model.isIndexing)；已索引：\(model.indexedFileCount)",
          "本轮扫描：\(model.scanned) 文件 / \(model.scannedDirectories) 目录",
          "搜索位置：\(model.sources.count)；用户黑名单：\(model.preferences.blacklist.count)；开发者黑名单：\(model.preferences.developerBlacklist?.count ?? 0)",
@@ -523,39 +704,76 @@ struct SearchSettings: View {
     }
     private var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "未知" }
     private var appBuild: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "未知" }
-    private var indexStorage: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("com.chenhuang.smbsearch/NameIndexes", isDirectory: true) }
+    private var indexStorage: URL { BiuStorage.directory.appendingPathComponent("NameIndexes", isDirectory: true) }
+    private var clipboardOptions: some View {
+        Form {
+            Section("复制成功提示（测试）") {
+                Picker("提示样式", selection: $copyFeedback) {
+                    ForEach(ClipboardCopyFeedback.allCases) { Text($0.rawValue).tag($0) }
+                }
+            }
+            Section("历史记录") {
+                Button("清空剪贴板历史…", role: .destructive) { confirmClearClipboard = true }
+                    .disabled(clipboard.items.isEmpty)
+                if !clipboard.error.isEmpty { Text(clipboard.error).foregroundStyle(.red) }
+            }
+        }
+        .formStyle(.grouped)
+        .alert("清空剪贴板历史？", isPresented: $confirmClearClipboard) {
+            Button("取消", role: .cancel) {}
+            Button("清空全部", role: .destructive) { clipboard.clearHistory() }
+        } message: {
+            Text("所有历史记录和收藏都会被删除，无法撤销。")
+        }
+    }
+
+    private func shortcutRow(_ title: String, manager: HotKeyManager) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 10) {
+                Text(title)
+                Spacer()
+                Button(manager.isRecording ? "按下新快捷键…" : (manager.settings.enabled ? manager.settings.display : "设置快捷键")) {
+                    for other in [hotKeys, secondaryKeys, clipboardKeys, quickTextKeys] where other !== manager {
+                        other.cancelRecording()
+                    }
+                    manager.beginRecording()
+                }
+                .frame(minWidth: 215, alignment: .trailing)
+                .background(ShortcutRecorder(manager: manager).frame(width: 1, height: 1))
+            }
+            if manager.hasError || manager.isRecording {
+                Text(manager.message)
+                    .font(.caption)
+                    .foregroundStyle(manager.hasError ? Color.red : Color.secondary)
+            }
+        }
+    }
+
     private var keyboard: some View {
         Form {
-            Section("全局呼出搜索") {
-                Toggle("启用全局快捷键", isOn: Binding(get: { hotKeys.settings.enabled }, set: { hotKeys.setEnabled($0) }))
-                HStack {
-                    Text("快捷键")
-                    Spacer()
-                    Button { hotKeys.beginRecording() } label: {
-                        Text(hotKeys.isRecording ? "请按下组合键…" : hotKeys.settings.display)
-                            .font(.system(size: 14, weight: .medium, design: .monospaced)).frame(minWidth: 150)
-                    }.disabled(!hotKeys.settings.enabled)
-                        .background(ShortcutRecorder(manager: hotKeys).frame(width: 1, height: 1))
-                    Button("恢复默认") { hotKeys.restoreDefault() }
-                }
-                Text(hotKeys.message).font(.callout).foregroundStyle(hotKeys.hasError ? Color.red : Color.secondary)
+            Section("搜索启动快捷键") {
+                shortcutRow("快捷键1", manager: hotKeys)
+                shortcutRow("快捷键2", manager: secondaryKeys)
             }
-            Section {
-                Text("点击快捷键后按下新快捷键，Esc取消。F1–F12可单独使用，其他按键需搭配Control、Option或Command。")
-                Text("若F键优先控制亮度或音量，请使用键盘的标准功能键模式。")
-                Text("在其他应用中也能呼出搜索并聚焦输入框。按 Esc 隐藏搜索窗口，找鸭继续常驻菜单栏；点击“退出找鸭”或按 ⌘Q 才会退出。")
-            }.font(.caption).foregroundStyle(.secondary)
+            Section("工具快捷键") {
+                shortcutRow("剪贴板历史", manager: clipboardKeys)
+                shortcutRow("快捷文本", manager: quickTextKeys)
+            }
+
         }.formStyle(.grouped)
     }
 }
-@MainActor final class SearchAppDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class SearchAppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     weak var hotKeys: HotKeyManager?
+    weak var secondaryKeys: HotKeyManager?
+    weak var clipboardKeys: HotKeyManager?
+    weak var quickTextKeys: HotKeyManager?
     private var statusItem: NSStatusItem?
     weak var library:SearchLibrary?
     func applicationWillTerminate(_ notification:Notification) {library?.shutdown()}
     private var windowObserver: NSObjectProtocol?
     private func hideWindowControls(_ window:NSWindow) {
-        guard window.title == "找鸭" || window.identifier?.rawValue == "search" else {return}
+        guard window.title == "Biu" || window.identifier?.rawValue == "search" else {return}
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         for kind in [NSWindow.ButtonType.closeButton,.miniaturizeButton,.zoomButton] {
@@ -563,30 +781,102 @@ struct SearchSettings: View {
             window.standardWindowButton(kind)?.superview?.isHidden = true
         }
     }
+    let updates = AppUpdates()
+    private var updateTask: Task<Void, Never>?
+
+    @objc private func checkForUpdates() {
+        updates.aboutRequest += 1
+        showPreferences()
+        Task { await updates.check(manual: true) }
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        updates.presentUpdateIfNeeded()
+    }
+
     private func installMenuBar() {
         let item=NSStatusBar.system.statusItem(withLength:NSStatusItem.squareLength)
         item.button?.image = DuckMenuBarIcon.load()
-        item.button?.toolTip="找鸭"
+        item.button?.toolTip="Biu"
         let menu=NSMenu()
-        for (title,action) in [("显示搜索",#selector(showSearch)),("设置…",#selector(showPreferences)),("退出找鸭",#selector(quitApp))] {
-            let entry=NSMenuItem(title:title,action:action,keyEquivalent:"");entry.target=self;menu.addItem(entry)
-        }
-        item.menu=menu;statusItem=item
+        menu.delegate = self
+        populateStatusMenu(menu)
+        item.menu = menu
+        statusItem = item
     }
+
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        populateStatusMenu(menu)
+    }
+
+    private func populateStatusMenu(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let items: [(String, Selector, [HotKeyManager?])] = [
+            ("显示搜索", #selector(showSearch), [hotKeys, secondaryKeys]),
+            ("剪贴板历史", #selector(showClipboard), [clipboardKeys]),
+            ("快捷文本", #selector(showQuickText), [quickTextKeys]),
+            ("检查更新…", #selector(checkForUpdates), []),
+            ("设置…", #selector(showPreferences), []),
+            ("退出Biu", #selector(quitApp), [])
+        ]
+        let rows = items.map { title, action, managers in
+            let keys = managers.compactMap { manager in
+                manager?.settings.enabled == true ? manager?.settings.display : nil
+            }
+            return (title: title, action: action, shortcut: keys.joined(separator: " / "))
+        }
+        let font = NSFont.menuFont(ofSize: 0)
+        let fontAttributes: [NSAttributedString.Key: Any] = [.font: font]
+        let titleWidth = rows.map { ($0.title as NSString).size(withAttributes: fontAttributes).width }.max() ?? 0
+        let shortcutWidth = rows.map { ($0.shortcut as NSString).size(withAttributes: fontAttributes).width }.max() ?? 0
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.tabStops = [NSTextTab(textAlignment: .right, location: ceil(titleWidth + shortcutWidth + 24))]
+
+        for row in rows {
+            let entry = NSMenuItem(title: row.title, action: row.action, keyEquivalent: "")
+            if !row.shortcut.isEmpty {
+                entry.attributedTitle = NSAttributedString(
+                    string: row.title + "\t" + row.shortcut,
+                    attributes: [.font: font, .paragraphStyle: paragraph]
+                )
+            }
+            if row.action == #selector(checkForUpdates), updates.hasSmallUpdate {
+                let dot = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "有小版本更新")
+                entry.image = dot?.withSymbolConfiguration(.init(pointSize: 7, weight: .regular)
+                    .applying(.init(paletteColors: [.systemRed])))
+                entry.image?.isTemplate = false
+            }
+            entry.target = self
+            menu.addItem(entry)
+        }
+    }
+
+    @objc func showClipboard() { clipboardKeys?.invoke() }
+    @objc func showQuickText() { quickTextKeys?.invoke() }
     @objc func showPreferences() {NSApp.activate(ignoringOtherApps:true);hotKeys?.openSettings?()}
     @objc func quitApp() {NSApp.terminate(nil)}
     func applicationDidFinishLaunching(_ notification: Notification) {
         if CommandLine.arguments.contains("--verify-startup") {FileHandle.standardError.write(Data("DID_FINISH_LAUNCH\n".utf8))}
         NSApp.setActivationPolicy(.regular)
-        if let url=Bundle.main.url(forResource:"RocketDuckEdge",withExtension:"icns"),let image=NSImage(contentsOf:url) {NSApp.applicationIconImage=image}
         installMenuBar()
+        if !CommandLine.arguments.contains("--verify-startup") {
+            updateTask = Task { [weak self] in
+                do {
+                    try await Task.sleep(for: .seconds(3))
+                    while !Task.isCancelled {
+                        await self?.updates.check()
+                        try await Task.sleep(for: .seconds(6 * 60 * 60))
+                    }
+                } catch {}
+            }
+        }
         windowObserver = NotificationCenter.default.addObserver(forName:NSWindow.didBecomeKeyNotification,object:nil,queue:.main) { [weak self] _ in
             Task { @MainActor in for window in NSApp.windows {self?.hideWindowControls(window)} }
         }
         DispatchQueue.main.asyncAfter(deadline:.now()+0.5) { [weak self] in self?.showSearch() }
         if CommandLine.arguments.contains("--verify-startup") {
             DispatchQueue.main.asyncAfter(deadline:.now()+2) {
-                let windows=NSApp.windows.filter {$0.identifier?.rawValue == "search" || $0.title == "找鸭"}
+                let windows=NSApp.windows.filter {$0.identifier?.rawValue == "search" || $0.title == "Biu"}
                 for window in windows {self.hideWindowControls(window)}
                 print("NATIVE_WINDOW_FRAME=\(windows.allSatisfy {$0.styleMask.contains(.titled) && $0.hasShadow && !$0.isOpaque})")
                 print("WINDOW_CONTROLS_HIDDEN=\(windows.allSatisfy {window in [NSWindow.ButtonType.closeButton,.miniaturizeButton,.zoomButton].allSatisfy {window.standardWindowButton($0)?.isHidden != false}})")
@@ -606,7 +896,7 @@ struct SearchSettings: View {
                 DispatchQueue.main.asyncAfter(deadline:.now()+0.2) {
                     self.showSearch()
                     DispatchQueue.main.asyncAfter(deadline:.now()+0.5) {
-                        let reopened=NSApp.windows.filter {$0.title == "找鸭" || $0.identifier?.rawValue == "search"}
+                        let reopened=NSApp.windows.filter {$0.title == "Biu" || $0.identifier?.rawValue == "search"}
                         print("REOPENED=\(reopened.contains {$0.isVisible}) VISIBLE_COUNT=\(reopened.filter {$0.isVisible}.count)")
                         fflush(stdout);NSApp.terminate(nil)
                     }
@@ -617,23 +907,41 @@ struct SearchSettings: View {
     @objc func showSearch() {
         if let hotKeys { hotKeys.invoke(); return }
         NSApp.activate(ignoringOtherApps:true)
-        if let window=NSApp.windows.first(where: {$0.title == "找鸭" || $0.identifier?.rawValue == "search"}) {window.center();window.makeKeyAndOrderFront(nil)}
+        if let window=NSApp.windows.first(where: {$0.title == "Biu" || $0.identifier?.rawValue == "search"}) {window.center();window.makeKeyAndOrderFront(nil)}
     }
     func applicationShouldHandleReopen(_ sender:NSApplication,hasVisibleWindows flag:Bool) -> Bool {if flag {return true};showSearch();return false}
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 @main struct SMBSearchApp: App {
+    init() { BiuStorage.migratePreferences() }
+
     @NSApplicationDelegateAdaptor(SearchAppDelegate.self) private var appDelegate
     @StateObject private var model = SearchLibrary()
     @StateObject private var hotKeys = HotKeyManager()
+    @StateObject private var secondaryKeys = HotKeyManager(purpose: .secondarySearch)
+    @StateObject private var quickTextKeys = HotKeyManager(purpose: .quickText)
+    @StateObject private var clipboardKeys = HotKeyManager(purpose:.clipboard)
     @StateObject private var home = HomeLibrary()
     @StateObject private var recentApps = RecentAppLibrary()
+    @StateObject private var clipboard = ClipboardHistoryStore()
+    @StateObject private var quickTexts = QuickTextLibrary()
     var body: some Scene {
-        WindowGroup("找鸭", id: "search") { SearchPanel(model: model, hotKeys: hotKeys, home: home,recentApps:recentApps).onAppear { appDelegate.hotKeys = hotKeys; appDelegate.library = model; if CommandLine.arguments.contains("--verify-startup") {DispatchQueue.main.asyncAfter(deadline:.now()+0.7) {model.refreshRecents()}} } }
+        WindowGroup("Biu", id: "search") { SearchPanel(model: model, hotKeys: hotKeys,clipboardKeys:clipboardKeys, quickTextKeys:quickTextKeys, home: home,recentApps:recentApps,clipboard:clipboard).onAppear { hotKeys.otherSearchShortcut = secondaryKeys; secondaryKeys.otherSearchShortcut = hotKeys; appDelegate.hotKeys = hotKeys; appDelegate.secondaryKeys = secondaryKeys; appDelegate.clipboardKeys = clipboardKeys; appDelegate.quickTextKeys = quickTextKeys; appDelegate.library = model; if CommandLine.arguments.contains("--verify-startup") {DispatchQueue.main.asyncAfter(deadline:.now()+0.7) {model.refreshRecents()}} } }
             .windowStyle(.hiddenTitleBar).defaultSize(width: 760, height: 580)
             .commands {
                 CommandGroup(replacing: .newItem) { Button("显示搜索") { hotKeys.invoke() }.keyboardShortcut("f", modifiers: [.command, .shift]) }
             }
-        Settings { SearchSettings(model: model, hotKeys: hotKeys, home: home) }
+        WindowGroup("剪贴板历史",id:"clipboard") {ClipboardHistoryView(store:clipboard, quickTexts:quickTexts).padding(12).frame(minWidth:420,minHeight:480).background(WindowBridge {window in clipboardKeys.toolWindow=window;window.title="剪贴板历史";window.titlebarSeparatorStyle = .none;window.makeKeyAndOrderFront(nil)})}.defaultSize(width:440,height:640)
+        Window("快捷文本", id: "quick-text") {
+            QuickTextsView(model: quickTexts)
+                .padding(12)
+                .frame(minWidth: 420, minHeight: 480)
+                .background(WindowBridge { window in
+                    quickTextKeys.toolWindow = window
+                    window.titlebarSeparatorStyle = .none
+                })
+                .onExitCommand { quickTextKeys.toolWindow?.orderOut(nil) }
+        }.defaultSize(width: 440, height: 640)
+        Settings { SearchSettings(updates: appDelegate.updates, model: model, hotKeys: hotKeys,secondaryKeys: secondaryKeys,clipboardKeys:clipboardKeys, quickTextKeys:quickTextKeys, clipboard:clipboard, home: home) }
     }
 }

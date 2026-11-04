@@ -6,7 +6,7 @@ import SwiftUI
     @Published private(set) var error = ""
     private let file: URL
     init(file: URL? = nil) {
-        self.file = file ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("com.chenhuang.smbsearch/category-order.json")
+        self.file = file ?? BiuStorage.directory.appendingPathComponent("category-order.json")
         let saved = (try? Data(contentsOf: self.file)).flatMap { try? JSONDecoder().decode([String].self, from: $0) } ?? []
         var seen = Set<String>()
         categories = saved.compactMap { name -> ResultCategory? in

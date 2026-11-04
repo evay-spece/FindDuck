@@ -59,7 +59,8 @@ actor SearchAccelerator {
         let exclusions=DuckExclusions(preferences.effectiveBlacklist)
         func eligible(_ entry:Entry) -> Bool {
             if exclusions.contains(entry.file.url) || preferences.blockedFiles?.contains(entry.file.id) == true  {return false}
-            return !preferences.suppressNoise || !DuckRules.suspicious(name:entry.name,path:entry.file.url.path)
+            if WechatLocations.isOutsideChatAttachments(entry.file.url) {return false}
+            return !preferences.hidesExtension(entry.file.url) && (!preferences.suppressNoise || !DuckRules.suspicious(name:entry.name,path:entry.file.url.path) || WechatLocations.isSearchableChatAttachment(entry.file.url))
         }
         func inScope(_ entry:Entry) -> Bool {
             if quick == .none {return true}
@@ -67,12 +68,12 @@ actor SearchAccelerator {
             switch quick {
             case .none:return true
             case .recent:return entry.file.url.pathExtension.lowercased() != "app" && opened[entry.file.id] != nil
+            case .modified:return entry.file.modified.map {Calendar.current.isDateInToday($0)} == true
             case .downloads:return DuckRules.under(entry.file.url,download) && DuckRules.today(entry.file)
             case .wechat:
                 guard let root=preferences.wechatFolder else {return false}
                 let common=["xwechat_files","WeChat Files"].contains(root.lastPathComponent)
-                let path=entry.file.url.path.lowercased()
-                let attachment = !common || path.contains("/msg/file/") || path.contains("/filestorage/file/") || path.contains("/message/messagetemp/")
+                let attachment = !common || WechatLocations.isChatAttachment(entry.file.url)
                 return attachment && DuckRules.under(entry.file.url,root) && DuckRules.today(entry.file)
             }
         }

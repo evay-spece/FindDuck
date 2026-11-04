@@ -13,6 +13,26 @@ import AppKit
         XCTAssertNil(DuckCalculator.evaluate("1/0"));XCTAssertNil(DuckCalculator.evaluate("2+"))
         XCTAssertNil(DuckCalculator.evaluate("report-2.pdf"));XCTAssertNil(DuckCalculator.evaluate("pow(2,4)"))
     }
+    func testMultipleTagFiltersUseORAndEscapeRemovesNewestCondition() {
+        let base=FileManager.default.temporaryDirectory.appendingPathComponent("findduck-tag-conditions-"+UUID().uuidString)
+        defer {try? FileManager.default.removeItem(at:base)}
+        let model=SearchLibrary(storage:base)
+        let a=base.appendingPathComponent("a.pdf"),b=base.appendingPathComponent("b.pdf"),c=base.appendingPathComponent("c.pdf")
+        model.preferences.fileTags=[a.path:["red"],b.path:["blue"],c.path:["green"]]
+        model.toggleTagSelection("red");model.toggleTagSelection("blue")
+        var prefs=model.preferences;prefs.tagFilters=model.selectedTagIDs
+        XCTAssertTrue(prefs.acceptsTag(a.path));XCTAssertTrue(prefs.acceptsTag(b.path));XCTAssertFalse(prefs.acceptsTag(c.path))
+        XCTAssertEqual(model.selectedTagIDs,["red","blue"])
+        XCTAssertTrue(model.consumeEscape());XCTAssertEqual(model.selectedTagIDs,["red"])
+        XCTAssertTrue(model.consumeEscape());XCTAssertTrue(model.selectedTagIDs.isEmpty)
+    }
+    func testDefaultResultTypeExclusionsOnlyApplyToCompactMode() {
+        var prefs=DuckPreferences()
+        let log=URL(fileURLWithPath:"/Users/test/report.log")
+        XCTAssertTrue(prefs.hidesExtension(log))
+        prefs.suppressNoise=false;XCTAssertFalse(prefs.hidesExtension(log))
+        prefs.suppressNoise=true;prefs.hiddenExtensions=[];XCTAssertFalse(prefs.hidesExtension(log))
+    }
     func testDisplayPathsPreserveOriginal() {
         let home=URL(fileURLWithPath:"/Users/alice")
         let file=URL(fileURLWithPath:"/Users/alice/Desktop/工作/a.pdf")
@@ -44,6 +64,24 @@ import AppKit
         p.blockedFiles=nil
         let outside=await engine.search(local:[],sharedSnapshot:index,term:"库存",category:.pdf,sort:.relevance,preferences:p,opened:[:],limit:200,scopeRoot:root.appendingPathComponent("other"))
         XCTAssertEqual(outside.total,0)
+    }
+    func testDirectoryShortcutShowsFilesWithoutKeyword() async {
+        let root=URL(fileURLWithPath:"/Volumes/ScopeTest")
+        let folder=root.appendingPathComponent("截图",isDirectory:true)
+        let older=FileHit(url:folder.appendingPathComponent("旧图.png"),modified:Date(timeIntervalSince1970:100))
+        let newer=FileHit(url:folder.appendingPathComponent("新图.png"),modified:Date(timeIntervalSince1970:200))
+        let nested=FileHit(url:folder.appendingPathComponent("子目录/说明.pdf"),modified:Date(timeIntervalSince1970:150))
+        let outside=FileHit(url:root.appendingPathComponent("其他.pdf"),modified:Date(timeIntervalSince1970:300))
+        let hidden=FileHit(url:folder.appendingPathComponent(".DS_Store"),modified:Date(timeIntervalSince1970:400))
+        let index=NameIndex(root:root,created:Date(),files:[older,newer,nested,outside,hidden],directories:[])
+        let preferences=DuckPreferences()
+        let engine=OilQueryEngine()
+        let results=await engine.search(local:[],sharedSnapshot:index,term:"",category:.all,sort:.relevance,preferences:preferences,opened:[:],limit:2,scopeRoot:folder)
+        XCTAssertEqual(results.total,4) // Three files and their subfolder.
+        XCTAssertEqual(results.hits.map(\.id),[newer.id,nested.id])
+        let pictures=await engine.search(local:[],sharedSnapshot:index,term:"",category:.images,sort:.name,preferences:preferences,opened:[:],limit:10,scopeRoot:folder)
+        XCTAssertEqual(pictures.total,2)
+        XCTAssertEqual(Set(pictures.hits.map(\.id)),[newer.id,older.id])
     }
     func testCompactAnnotationsRespectRecent50() async {
         let root=URL(fileURLWithPath:"/tmp/compact-notes")

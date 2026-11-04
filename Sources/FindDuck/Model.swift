@@ -68,7 +68,7 @@ struct AutoSettings: Codable { let enabled: Bool }
         return "已索引 \(index.files.count) 个文件 · 索引变更于 \(index.created.formatted(date: .numeric, time: .shortened))"
     }
     init(storage: URL? = nil, policy: ScanPolicy = ScanPolicy(), tickInterval: Duration = .seconds(2), availabilityInterval: TimeInterval = 30, batchLimit: Int = 2, notificationLimit: Int = 64, restoreSelection: Bool = true, persistSelection: Bool = true) {
-        self.storage = storage ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("com.chenhuang.smbsearch/NameIndexes", isDirectory: true)
+        self.storage = storage ?? BiuStorage.directory.appendingPathComponent("NameIndexes", isDirectory: true)
         self.persistSelection = persistSelection
         self.policy = policy
         self.tickInterval = tickInterval

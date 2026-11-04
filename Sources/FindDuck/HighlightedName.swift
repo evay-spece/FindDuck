@@ -15,11 +15,15 @@ enum KeywordHighlights {
 struct HighlightedName:NSViewRepresentable {
     let name:String
     let query:String
+    var fontSize:CGFloat=13
+    var inverted=false
     func makeNSView(context:Context)->Surface {let view=Surface();view.setContentHuggingPriority(.defaultHigh,for:.horizontal);view.setContentCompressionResistancePriority(.defaultLow,for:.horizontal);return view}
-    func updateNSView(_ view:Surface,context:Context) {if view.name != name || view.query != query {view.name=name;view.query=query;view.invalidateIntrinsicContentSize();view.needsDisplay=true};view.setAccessibilityLabel(name)}
+    func updateNSView(_ view:Surface,context:Context) {if view.name != name || view.query != query || view.fontSize != fontSize || view.inverted != inverted {view.name=name;view.query=query;view.fontSize=fontSize;view.inverted=inverted;view.invalidateIntrinsicContentSize();view.needsDisplay=true};view.setAccessibilityLabel(name)}
     final class Surface:NSView {
         var name="",query=""
-        private let font=NSFont.systemFont(ofSize:13,weight:.semibold)
+        var fontSize:CGFloat=13
+        var inverted=false
+        private var font:NSFont {NSFont.systemFont(ofSize:fontSize,weight:.semibold)}
         override var isFlipped:Bool {true}
         override var intrinsicContentSize:NSSize {NSSize(width:(name as NSString).size(withAttributes:[.font:font]).width+2,height:18)}
         override init(frame:NSRect) {super.init(frame:frame);setAccessibilityElement(true);setAccessibilityRole(.staticText)}
@@ -27,7 +31,7 @@ struct HighlightedName:NSViewRepresentable {
         override func draw(_ dirtyRect:NSRect) {
             guard !name.isEmpty else {return}
             let paragraph=NSMutableParagraphStyle();paragraph.lineBreakMode = .byTruncatingTail
-            let string=NSMutableAttributedString(string:name,attributes:[.font:font,.foregroundColor:NSColor.labelColor,.paragraphStyle:paragraph])
+            let string=NSMutableAttributedString(string:name,attributes:[.font:font,.foregroundColor:inverted ? NSColor.white : NSColor.labelColor,.paragraphStyle:paragraph])
             let line=CTLineCreateWithAttributedString(string)
             let fullWidth=CGFloat(CTLineGetTypographicBounds(line,nil,nil,nil))
             let right=max(0,bounds.width-(fullWidth>bounds.width ? 13 : 0))
@@ -35,9 +39,9 @@ struct HighlightedName:NSViewRepresentable {
                 let start=CTLineGetOffsetForStringIndex(line,range.location,nil),end=CTLineGetOffsetForStringIndex(line,range.location+range.length,nil)
                 let x=max(0,min(start,end)),width=min(right,max(start,end))-x
                 guard width>0 else {continue}
-                NSColor.controlAccentColor.withAlphaComponent(0.15).setFill()
-                NSBezierPath(roundedRect:NSRect(x:x,y:1,width:width,height:16),xRadius:3,yRadius:3).fill()
-                string.addAttribute(.foregroundColor,value:NSColor.controlAccentColor.blended(withFraction:0.25,of:.labelColor) ?? NSColor.controlAccentColor,range:range)
+                (inverted ? NSColor.white.withAlphaComponent(0.26) : NSColor(FindDuckHighlight.soft)).setFill()
+                NSBezierPath(roundedRect:NSRect(x:x,y:1,width:width,height:16),xRadius:6,yRadius:6).fill()
+                string.addAttribute(.foregroundColor,value:inverted ? NSColor.white : (NSColor.controlAccentColor.blended(withFraction:0.25,of:.labelColor) ?? NSColor.controlAccentColor),range:range)
             }
             string.draw(in:NSRect(x:0,y:1,width:bounds.width,height:18))
         }

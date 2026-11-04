@@ -2,12 +2,24 @@ import AppKit
 import SwiftUI
 
 struct DuckPreferences: Codable {
+ var calculatorEnabled: Bool? = nil
+ var linkCleanerEnabled: Bool? = nil
+ var idToLinkEnabled: Bool? = nil
+ var productLinksEnabled: Bool? = nil
+ var productLinksOn: Bool { productLinksEnabled ?? ((linkCleanerEnabled ?? true) || (idToLinkEnabled ?? true)) }
+ var calculatorOn: Bool { calculatorEnabled ?? true }
+ var linkCleanerOn: Bool { productLinksOn }
+ var idToLinkOn: Bool { productLinksOn }
  var blacklist: [URL] = []
  var blacklistDefaultsVersion: Int? = nil
  var developerBlacklist: [URL]? = nil
  var effectiveBlacklist: [URL] { Array(Set(blacklist + (developerBlacklist ?? []))) }
  var localIndexOptions: LocalIndexOptions? = nil
  var suppressNoise = true
+ var hiddenExtensions:[String]? = nil
+ static let normalHiddenExtensions:[String] = ["log","tmp","cache","db","sqlite","sqlite3","lock","plist","dylib","so","o","pyc","class"]
+ var effectiveHiddenExtensions:Set<String> {Set(hiddenExtensions ?? Self.normalHiddenExtensions)}
+ func hidesExtension(_ url:URL)->Bool {suppressNoise && effectiveHiddenExtensions.contains(url.pathExtension.lowercased())}
  var recentOpened: [String: Date] = [:]
  var colorMarks: [String:FileMarkColor]? = nil // Legacy single-color storage, migrated on load.
  var customTags: [FileTag]? = nil
@@ -15,8 +27,10 @@ struct DuckPreferences: Codable {
  var fileNotes: [String:String]? = nil
  var blockedFiles: Set<String>? = nil
  var tagFilter: String? = nil
+ var tagFilters:[String]? = nil
+ var selectedTagIDs:[String] {if let tagFilters,!tagFilters.isEmpty {return tagFilters};return tagFilter.map {[$0]} ?? []}
  func annotated(_ path:String)->Bool { !(fileTags?[path] ?? []).isEmpty || !(fileNotes?[path] ?? "").isEmpty }
- func acceptsTag(_ path:String)->Bool { guard let tagFilter else {return true};return tagFilter == "*" ? annotated(path) : fileTags?[path]?.contains(tagFilter) == true }
+ func acceptsTag(_ path:String)->Bool {let selected=selectedTagIDs;guard !selected.isEmpty else {return true};return selected.contains("*") ? annotated(path) : !(fileTags?[path] ?? []).isDisjoint(with:selected) || (fileNotes?[path].map { selected.contains(FileTag.noteID($0)) } ?? false)}
  func annotationText(_ path:String)->String { let ids=fileTags?[path] ?? [];return (FileTag.defaults+(customTags ?? [])).filter {ids.contains($0.id)}.map(\.displayName).joined(separator:" ")+" "+(fileNotes?[path] ?? "") }
  var annotatedPaths:Set<String> {Set((fileTags ?? [:]).filter {!$0.value.isEmpty}.keys).union((fileNotes ?? [:]).filter {!$0.value.isEmpty}.keys)}
  mutating func migrateColorTags()->Bool {
@@ -50,12 +64,13 @@ enum DuckDefaults {
   let user = ["Library/Caches", "Library/Logs", "Library/Saved Application State",
               "Library/HTTPStorages", "Library/WebKit", "Library/Cookies",
               "Library/Developer/Xcode/DerivedData", "Library/Developer/CoreSimulator",
-              "Library/Metadata/CoreSpotlight", "Library/Application Support/com.chenhuang.smbsearch",
+              "Library/Metadata/CoreSpotlight", "Library/Application Support/\(BiuStorage.identifier)",
+              "Library/Application Support/\(BiuStorage.legacyIdentifier)",
               ".cache", ".npm", ".gradle/caches"]
   return system.map { URL(fileURLWithPath: $0, isDirectory: true) } + user.map { home.appendingPathComponent($0, isDirectory: true) }
  }
 }
-enum QuickScope: String, CaseIterable, Hashable, Sendable { case none = "全部文件", wechat = "今天微信文件", downloads = "今天下载", recent = "最近打开文件" }
+enum QuickScope: String, CaseIterable, Hashable, Sendable { case none = "全部文件", wechat = "今天微信文件", downloads = "今天下载", modified = "今天修改的文件", recent = "最近打开文件" }
 struct DuckExclusions: Sendable {
  private let roots: [String]
  init(_ paths: [URL]) { roots=paths.map { $0.standardizedFileURL.path } }
@@ -70,6 +85,7 @@ enum DuckRules {
  static func excluded(_ url: URL, paths: [URL]) -> Bool { DuckExclusions(paths).contains(url) }
  static func suspicious(_ file: FileHit) -> Bool { suspicious(name:file.name,path:file.url.path) }
  static func suspicious(name:String,path:String) -> Bool {
+  if name.hasPrefix(".") || name.hasPrefix("~$") { return true }
   if !path.hasPrefix("/System/Applications/"), ["/System/","/private/var/","/usr/","/bin/","/sbin/"].contains(where:path.hasPrefix) { return true }
   let name=(name as NSString).deletingPathExtension
   let bytes=Array(name.utf8)
@@ -149,5 +165,6 @@ struct FileTag:Codable,Identifiable,Equatable,Sendable {
  var color:FileMarkColor
  static func builtin(_ color:FileMarkColor)->FileTag {FileTag(id:"color:"+String(describing:color),name:"",color:color)}
  static var defaults:[FileTag] {FileMarkColor.allCases.map(builtin)}
+ static func noteID(_ text: String) -> String { "note:" + text }
  var displayName:String {name.isEmpty ? color.rawValue : name}
 }

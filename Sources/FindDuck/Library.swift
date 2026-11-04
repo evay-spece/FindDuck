@@ -12,13 +12,26 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     @Published var sources:[SearchRoot]=[]
     @Published var query=""
     @Published var tagFilter:String? {didSet {if !batching {search()}}}
-    var isHome:Bool {query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && scopeTitle == nil && tagFilter == nil}
+    @Published var additionalTagFilters:[String]=[] {didSet {if !batching {search()}}}
+    var selectedTagIDs:[String] {(tagFilter.map {[$0]} ?? [])+additionalTagFilters}
+    private var conditionOrder:[String]=[]
+    func markCondition(_ key:String) {conditionOrder.removeAll {$0 == key};conditionOrder.append(key)}
+    func toggleTagSelection(_ id:String) {
+        batching=true
+        if tagFilter == id {tagFilter=additionalTagFilters.first;additionalTagFilters=Array(additionalTagFilters.dropFirst())}
+        else if additionalTagFilters.contains(id) {additionalTagFilters.removeAll {$0 == id}}
+        else if tagFilter == nil {tagFilter=id;markCondition("tag:"+id)}
+        else {additionalTagFilters.append(id);markCondition("tag:"+id)}
+        batching=false;search()
+    }
+    func clearTagSelection() {batching=true;tagFilter=nil;additionalTagFilters=[];batching=false;search()}
+    var isHome:Bool {query.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty && scopeTitle == nil && selectedTagIDs.isEmpty}
     @Published private(set) var searchHistory:[String]=[]
     private var historyTask:Task<Void,Never>?
     private var historyCandidate=""
     @Published private(set) var directoryShortcuts:[URL]=[]
     @Published private(set) var directoryScope:URL?
-    var scopeTitle:String? {directoryScope.map { $0.lastPathComponent.isEmpty ? "/" : $0.lastPathComponent } ?? (quickScope != .none ? quickScope.rawValue : !localSelected && sharedSelected ? "共享盘" : nil)}
+    var scopeTitle:String? {directoryScope.map { DisplayPath.name($0) } ?? (quickScope != .none ? quickScope.rawValue : !localSelected && sharedSelected ? "共享盘" : nil)}
     @Published var preferences=DuckPreferences()
     @Published var category:ResultCategory = .all {didSet {if !batching && category != oldValue {search()}}}
     @Published var resultSort:ResultSort = .relevance {didSet {if !batching && resultSort != oldValue {if resultSort == .recent {refreshRecents()};search()}}}
@@ -61,9 +74,11 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     @Published private(set) var availableAnnotationPaths=Set<String>()
     var visibleTags:[FileTag] {
         let used=Set(availableAnnotationPaths.flatMap {Array(preferences.fileTags?[$0] ?? [])})
-        return tagCatalog.enumerated().filter {used.contains($0.element.id)}.sorted {a,b in
+        let tags = tagCatalog.enumerated().filter {used.contains($0.element.id)}.sorted {a,b in
             if a.element.name.isEmpty != b.element.name.isEmpty {return !a.element.name.isEmpty};return a.offset < b.offset
         }.map(\.element)
+        let notes = Set(availableAnnotationPaths.compactMap { preferences.fileNotes?[$0] }).sorted()
+        return tags + notes.filter { !$0.isEmpty }.map { FileTag(id: FileTag.noteID($0), name: $0, color: .gray) }
     }
     private let systemRecents=SystemRecents()
     private var systemOpened:[String:Date]=[:],lastRecents:Date?
@@ -75,11 +90,18 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     var scannedDirectories:Int {localEngines.values.reduce(0){$0+$1.directoryCount}+sharedEngines.values.reduce(0){$0+$1.scannedDirectories}}
     var connectionUnavailable:Bool {!localEngines.values.contains {$0.hasIndex} && !sharedEngines.isEmpty && sharedEngines.values.allSatisfy {$0.connectionUnavailable}}
     var indexSummary:String {"\(sources.count) 个搜索位置 · 已索引 \(indexedFileCount) 个文件 · Oil Find 内核"}
-    var indexStatus:String {(localEngines.values.map {"\($0.root.lastPathComponent.isEmpty ? "/" : $0.root.lastPathComponent)：\($0.status)"}+sources.filter {$0.kind == .shared}.map {"\($0.url.lastPathComponent)：\(sharedEngines[$0.id]?.indexStatus ?? "等待索引")"}).joined(separator:"\n")}
+    var indexStatus:String {
+        let wechat=sources.filter {$0.kind == .local && WechatLocations.isContainer($0.url)}
+        let regular=localEngines.values.filter {engine in !wechat.contains {DuckRules.under(engine.root,$0.url)} }
+            .map {"\($0.root.path == "/" ? "全盘搜索" : $0.root.lastPathComponent)：\($0.status)"}
+        let attachments=wechat.map {"微信收发文件：\(summary($0))"}
+        let shared=sources.filter {$0.kind == .shared}.map {"\($0.url.lastPathComponent)：\(sharedEngines[$0.id]?.indexStatus ?? "等待索引")"}
+        return (regular+attachments+shared).joined(separator:"\n")
+    }
     var coverage:String {"本地：FSEvents 实时更新与历史补齐；共享盘：分批检查。本地不可访问目录：\(localEngines.values.reduce(UInt64(0)){$0+$1.unreadableDirectories})。\n"+sharedEngines.values.map(\.coverage).joined(separator:"\n")}
     var hasMoreResults:Bool {hits.count < resultCount}
     init(storage:URL?=nil,policy:ScanPolicy=ScanPolicy(),tick:Duration = .seconds(2)) {
-        self.storage=storage ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("com.chenhuang.smbsearch/NameIndexes",isDirectory:true)
+        self.storage=storage ?? BiuStorage.directory.appendingPathComponent("NameIndexes",isDirectory:true)
         self.policy=policy;self.tick=tick
         try? FileManager.default.createDirectory(at:self.storage.appendingPathComponent("OilCore"),withIntermediateDirectories:true)
         if let data=try? Data(contentsOf:self.storage.appendingPathComponent("duck-preferences.json")),let value=try? JSONDecoder().decode(DuckPreferences.self,from:data) {preferences=value}
@@ -88,12 +110,46 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
         if let data=try? Data(contentsOf:self.storage.appendingPathComponent("automatic.json")),let value=try? JSONDecoder().decode(AutoSettings.self,from:data) {autoUpdate=value.enabled}
         if let data=try? Data(contentsOf:self.storage.appendingPathComponent("sources.json")),let value=try? JSONDecoder().decode([SearchRoot].self,from:data) {sources=value}
         else if let data=try? Data(contentsOf:self.storage.appendingPathComponent("selection.json")),let url=try? JSONDecoder().decode(URL.self,from:data) {sources=[SearchRoot(url:url,kind:url.path.hasPrefix("/Volumes/") ? .shared : .local)];saveSources()}
+        if storage == nil && !FileManager.default.fileExists(atPath:self.storage.appendingPathComponent("local-root-bootstrapped.json").path) {
+            if let root=sources.firstIndex(where:{$0.url.standardizedFileURL.path == "/"}) {
+                if sources[root].kind != .local {sources[root].kind = .local;saveSources()}
+            } else if !sources.contains(where:{$0.kind == .local}) {
+                sources.append(SearchRoot(url:URL(fileURLWithPath:"/",isDirectory:true),kind:.local))
+                saveSources()
+            }
+            save(true,to:"local-root-bootstrapped.json")
+        }
+        removeCoveredDownloadsSource()
         let found=detectWechat();if preferences.wechatFolder != found {preferences.wechatFolder=found;savePreferences()}
+        if storage == nil,let found,!FileManager.default.fileExists(atPath:self.storage.appendingPathComponent("wechat-source-bootstrapped.json").path) {
+            if !sources.contains(where:{$0.kind == .local && $0.url.standardizedFileURL == found.standardizedFileURL}) {
+                sources.append(SearchRoot(url:found.standardizedFileURL,kind:.local));saveSources()
+            }
+            save(true,to:"wechat-source-bootstrapped.json")
+        }
         if let data=try? Data(contentsOf:self.storage.appendingPathComponent("directory-shortcuts.json")),let urls=try? JSONDecoder().decode([URL].self,from:data) {directoryShortcuts=urls}
-        if let data=try? Data(contentsOf:self.storage.appendingPathComponent("search-history.json")),let values=try? JSONDecoder().decode([String].self,from:data) {searchHistory=Array(values.prefix(5))}
+        if let data=try? Data(contentsOf:self.storage.appendingPathComponent("search-history.json")),let values=try? JSONDecoder().decode([String].self,from:data) {searchHistory=Array(values.prefix(10))}
         configureAll();refreshAnnotationAvailability()
+        let authorizationRescan=self.storage.appendingPathComponent("rescan-after-disk-authorization.json")
+        if storage == nil && FileManager.default.fileExists(atPath:authorizationRescan.path) {
+            Task { [weak self] in
+                guard let self else {return}
+                for engine in self.localEngines.values {engine.rebuild()}
+                try? FileManager.default.removeItem(at:authorizationRescan)
+            }
+        }
     }
     private func detectWechat()->URL? {WechatLocations.locate(home:FileManager.default.homeDirectoryForCurrentUser,existing:preferences.wechatFolder)}
+    private func removeCoveredDownloadsSource() {
+        guard let root=sources.first(where:{$0.kind == .local && $0.url.standardizedFileURL.path == "/"}) else {return}
+        let downloads=FileManager.default.urls(for:.downloadsDirectory,in:.userDomainMask)[0].standardizedFileURL
+        let config=nativeConfig(root.url)
+        let covered=Array(downloads.path.utf8).withUnsafeBufferPointer {!config.isExcluded(path:$0)}
+        guard covered else {return}
+        let original=sources.count
+        sources.removeAll {$0.kind == .local && $0.url.standardizedFileURL == downloads}
+        if sources.count != original {saveSources()}
+    }
     private var scanPolicy:ScanPolicy {var value=policy;value.excludedPaths=Array(Set(policy.excludedPaths+preferences.effectiveBlacklist));return value}
     private func nativeConfig(_ root:URL)->IndexConfig {
         var config=IndexConfig.standard()
@@ -122,7 +178,7 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
             refreshAnnotationAvailability()
             objectWillChange.send()
             if hasIndex && status.hasPrefix("Oil Find 首次") {status=""}
-            if !query.isEmpty || scopeTitle != nil || tagFilter != nil {search()}
+            if !query.isEmpty || scopeTitle != nil || !selectedTagIDs.isEmpty {search()}
         }
     }
     private func configureAll() {
@@ -135,7 +191,9 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
         for (id,engine) in localEngines {subscriptions.removeValue(forKey:id);engine.stop()}
         localEngines.removeAll()
         var accepted:[(URL,IndexConfig)]=[]
+        var attachmentSources:[SearchRoot]=[]
         for source in sources.filter({$0.kind == .local}).sorted(by:{$0.url.path.count < $1.url.path.count}) {
+            if WechatLocations.isContainer(source.url) {attachmentSources.append(source);continue}
             let covered=accepted.contains {parent,config in
                 guard DuckRules.under(source.url,parent) else {return false}
                 return Array(source.url.standardizedFileURL.path.utf8).withUnsafeBufferPointer {!config.isExcluded(path:$0)}
@@ -143,9 +201,17 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
             if covered {continue}
             let config=nativeConfig(source.url);accepted.append((source.url,config));attachLocal(source.id,root:source.url,config:config)
         }
-        if let wechat=preferences.wechatFolder,accepted.contains(where:{DuckRules.under(wechat,$0.0)}) {
-            let covered=accepted.contains {parent,config in DuckRules.under(wechat,parent) && Array(wechat.path.utf8).withUnsafeBufferPointer {!config.isExcluded(path:$0)} }
-            if !covered {attachLocal("wechat:"+wechat.path,root:wechat,config:nativeConfig(wechat))}
+        for source in attachmentSources {
+            for attachment in WechatLocations.attachmentRoots(in:source.url) {
+                let covered=accepted.contains {parent,config in
+                    DuckRules.under(attachment,parent) && Array(attachment.path.utf8).withUnsafeBufferPointer {!config.isExcluded(path:$0)}
+                }
+                if covered {continue}
+                var config=nativeConfig(attachment)
+                if ["attach","MsgAttach"].contains(attachment.lastPathComponent) {config.excludedExtensions.insert("dat")}
+                accepted.append((attachment,config))
+                attachLocal("wechat:"+attachment.path,root:attachment,config:config)
+            }
         }
     }
     private func attachLocal(_ id:String,root:URL,config:IndexConfig) {
@@ -176,6 +242,12 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     }
     func summary(_ source:SearchRoot)->String {
         if source.kind == .shared,let engine=sharedEngines[source.id] {return engine.isIndexing ? "正在索引 \(engine.scanned) 个文件" : "\(engine.index?.files.count ?? 0) 个文件"}
+        if source.kind == .local && WechatLocations.isContainer(source.url) {
+            let engines=WechatLocations.attachmentRoots(in:source.url).compactMap {localEngines["wechat:"+$0.path]}
+            if engines.isEmpty {return "未找到聊天收发文件目录"}
+            let count=engines.reduce(0) {$0+$1.fileCount}
+            return engines.contains(where:{$0.isScanning}) ? "正在索引聊天附件 · 已收录 \(count) 个文件" : "\(count) 个聊天附件 · 实时更新中"
+        }
         if let engine=localEngines[source.id] {return "\(engine.fileCount) 个文件 · \(engine.status)"}
         return "由上级本地搜索位置覆盖"
     }
@@ -200,7 +272,7 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
         let term=query.trimmingCharacters(in:.whitespacesAndNewlines),quick=quickScope
         let today=quick == .downloads || quick == .wechat
         if !today {quickID=UUID();quickTask?.cancel();quickWatchTask?.cancel();quickWatchTask=nil;quickWatcher?.stop();quickWatcher=nil;watchedQuickRoot=nil;quickNeedsRefresh=false;refreshingQuick=false;quickRefreshStatus=""}
-        guard !term.isEmpty || scopeTitle != nil || tagFilter != nil else {status="";clearResults();return}
+        guard !term.isEmpty || scopeTitle != nil || !selectedTagIDs.isEmpty else {status="";clearResults();return}
         guard localSelected || sharedSelected else {hits=[];resultCount=0;return}
         if today && !localSelected {hits=[];resultCount=0;return}
         let compact=quickSnapshots[quick].flatMap {Calendar.current.isDateInToday($0.created) ? $0 : nil}
@@ -210,10 +282,10 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
         if !today && !hasIndex && quick != .recent && !(sharedSelected && deepQuery == term && !deepHits.isEmpty) {hits=[];resultCount=0;status="Oil Find 首次索引正在建立，请稍候。";return}
         status=""
         if !term.isEmpty {scheduleHistory(term)}
-        let request="\(directoryScope?.path ?? "")|\(term)|\(quick.rawValue)|\(category.rawValue)|\(resultSort.rawValue)|\(localSelected)|\(sharedSelected)|\(preferences.suppressNoise)|\(tagFilter ?? "")"
+        let request="\(directoryScope?.path ?? "")|\(term)|\(quick.rawValue)|\(category.rawValue)|\(resultSort.rawValue)|\(localSelected)|\(sharedSelected)|\(preferences.suppressNoise)|\(selectedTagIDs.joined(separator:","))"
         if lastRequest != request {displayLimit=200;lastRequest=request;preserveHitOrder=false}
         let id=UUID();searchID=id;isSearching=true
-        let prefs:DuckPreferences={var value=preferences;value.tagFilter=tagFilter;return value}()
+        let prefs:DuckPreferences={var value=preferences;value.tagFilter=tagFilter;value.tagFilters=selectedTagIDs;return value}()
         let oilSearch=oilSearch,compactSearch=compactSearch,system=systemOpened,sort=resultSort,category=category,limit=displayLimit
         let scopeRoot=directoryScope
         let downloads=FileManager.default.urls(for:.downloadsDirectory,in:.userDomainMask)[0]
@@ -223,6 +295,10 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
             let worker=Task.detached(priority:.userInitiated) {
                 let opened=prefs.recentOpened.merging(system,uniquingKeysWith:max)
                 if today,let compact {return await compactSearch.search(index:compact,term:term,category:category,sort:sort,quick:quick,preferences:prefs,opened:opened,download:downloads,limit:limit)}
+                if quick == .modified {
+                    let snapshot=await oilSearch.modifiedTodaySnapshot(local:local,sharedSnapshot:shared,now:Date())
+                    return await compactSearch.search(index:snapshot,term:term,category:category,sort:.modified,quick:.none,preferences:prefs,opened:opened,download:downloads,limit:limit)
+                }
                 if quick == .recent {
                     let snapshot=await oilSearch.recentSnapshot(local:local,sharedSnapshot:shared,opened:opened,preferences:prefs)
                     return await compactSearch.search(index:snapshot,term:term,category:category,sort:sort,quick:.recent,preferences:prefs,opened:opened,download:downloads,limit:limit)
@@ -263,24 +339,25 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     }
     func activateQuick(_ quick:QuickScope) {
         quickTask?.cancel();quickID=UUID();refreshingQuick=false;quickRefreshStatus=""
-        batching=true;directoryScope=nil;quickScope=quick;localSelected=true;sharedSelected=quick == .recent
+        batching=true;directoryScope=nil;quickScope=quick;localSelected=true;sharedSelected=quick == .recent || quick == .modified
         if quick == .recent {resultSort = .recent}
+        if quick == .modified {resultSort = .modified}
         if quick == .downloads {let root=FileManager.default.urls(for:.downloadsDirectory,in:.userDomainMask)[0];if !sources.contains(where:{$0.kind == .local && DuckRules.under(root,$0.url)}) {add(root,kind:.local)}}
         if quick == .wechat {
             let found=detectWechat();if preferences.wechatFolder != found {preferences.wechatFolder=found;quickSnapshots.removeValue(forKey:.wechat);savePreferences();configureLocals()}
-            if let root=preferences.wechatFolder,!sources.contains(where:{$0.kind == .local && DuckRules.under(root,$0.url)}) {add(root,kind:.local)}
         }
         batching=false;search()
-        if quick == .recent {lastRecents=nil;refreshRecents()} else if !refreshingQuick {refreshToday(quick)}
+        if quick == .recent {lastRecents=nil;refreshRecents()}
+        else if quick == .downloads || quick == .wechat {if !refreshingQuick {refreshToday(quick)}}
     }
     func showHome() {
         rememberSearch(query);historyTask?.cancel();historyTask=nil;historyCandidate=""
-        batching=true;query="";tagFilter=nil;category = .all;directoryScope=nil;quickScope = .none;localSelected=true;sharedSelected=true;batching=false
+        batching=true;query="";tagFilter=nil;additionalTagFilters=[];category = .all;directoryScope=nil;quickScope = .none;localSelected=true;sharedSelected=true;batching=false;conditionOrder=[]
         status="";deepStatus="";search()
     }
     func rememberSearch(_ value:String) {
         let term=value.trimmingCharacters(in:.whitespacesAndNewlines);guard !term.isEmpty else {return}
-        var values=searchHistory.filter {$0.caseInsensitiveCompare(term) != .orderedSame};values.insert(term,at:0);values=Array(values.prefix(5))
+        var values=searchHistory.filter {$0.caseInsensitiveCompare(term) != .orderedSame};values.insert(term,at:0);values=Array(values.prefix(10))
         guard values != searchHistory else {return};searchHistory=values;save(values,to:"search-history.json")
     }
     private func scheduleHistory(_ term:String) {
@@ -305,7 +382,13 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     func addDirectoryShortcut(_ url:URL,kind:SourceKind) {
         let normalized=url.standardizedFileURL
         if !directoryShortcuts.contains(normalized) {directoryShortcuts.append(normalized);save(directoryShortcuts,to:"directory-shortcuts.json")}
-        let covered=sources.contains {$0.kind == kind && DuckRules.under(normalized,$0.url)}
+        let covered=sources.contains {source in
+            guard source.kind == kind else {return false}
+            if WechatLocations.isContainer(source.url) {
+                return WechatLocations.attachmentRoots(in:source.url).contains {DuckRules.under(normalized,$0)}
+            }
+            return DuckRules.under(normalized,source.url)
+        }
         if !covered {add(normalized,kind:kind)}
         else if kind == .local {
             let config=nativeConfig(sources.first {$0.kind == .local && DuckRules.under(normalized,$0.url)}!.url)
@@ -384,8 +467,14 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     }
     func removeBlacklist(_ url:URL,developer:Bool=false) {if developer {preferences.developerBlacklist?.removeAll {$0 == url}} else {preferences.blacklist.removeAll {$0 == url}};savePreferences();quickSnapshots.removeAll();configureAll();search()}
     func chooseBlacklist(developer:Bool=false) {let panel=NSOpenPanel();panel.canChooseDirectories=true;panel.canChooseFiles=false;if panel.runModal() == .OK,let url=panel.url {addBlacklist(url,developer:developer)}}
-    func diskAuthorization() {NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!);status="请在完全磁盘访问权限中开启应用程序里的找鸭，然后重启。"}
-    func chooseAuthorizedDisk() {chooseFolder(kind:.local)}
+    func diskAuthorization() {
+        if let root=sources.first(where:{$0.id == "/"}) {
+            if root.kind != .local {setKind(root,.local)}
+        } else {add(URL(fileURLWithPath:"/",isDirectory:true),kind:.local)}
+        save(true,to:"rescan-after-disk-authorization.json")
+        NSWorkspace.shared.open(URL(string:"x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+        status="请在完全磁盘访问权限中开启Biu，然后重新打开；本地磁盘已自动加入搜索范围，重新打开后会核对索引。"
+    }
     func chooseFolder(kind:SourceKind) {let panel=NSOpenPanel();panel.canChooseDirectories=true;panel.canChooseFiles=false;panel.allowsMultipleSelection=true;panel.directoryURL=URL(fileURLWithPath:kind == .local ? "/" : "/Volumes");if panel.runModal() == .OK {for url in panel.urls {add(url,kind:kind)}}}
     func deepSearch() {
         if deepSearching {deepTask?.cancel();return}
@@ -423,7 +512,7 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
     func deleteTag(_ tag:FileTag) {
         preferences.customTags?.removeAll {$0.id == tag.id}
         for path in Array(preferences.fileTags?.keys ?? Dictionary<String,Set<String>>().keys) {preferences.fileTags?[path]?.remove(tag.id)}
-        if tagFilter == tag.id {tagFilter=nil};preserveHitOrder=true;savePreferences();refreshAnnotationAvailability();search()
+        if selectedTagIDs.contains(tag.id) {toggleTagSelection(tag.id)};preserveHitOrder=true;savePreferences();refreshAnnotationAvailability();search()
     }
     func blockFile(_ file:FileHit) {var paths=preferences.blockedFiles ?? [];paths.insert(file.id);preferences.blockedFiles=paths;savePreferences();refreshAnnotationAvailability();search()}
     func unblockFile(_ path:String) {preferences.blockedFiles?.remove(path);savePreferences();refreshAnnotationAvailability();search()}
@@ -444,15 +533,22 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
         alert.addButton(withTitle:"创建并添加");alert.addButton(withTitle:"取消")
         let view=NSView(frame:NSRect(x:0,y:0,width:280,height:92)),field=NSTextField(frame:NSRect(x:10,y:54,width:260,height:26))
         field.placeholderString="标签文字";field.setAccessibilityLabel("标签文字")
-        var color=FileMarkColor.blue
+        var color=FileMarkColor.red
         let palette=TagColorPalette(selected:{[color]},toggle:{color=$0});palette.frame=NSRect(x:0,y:4,width:280,height:42)
         view.addSubview(field);view.addSubview(palette);alert.accessoryView=view;alert.window.initialFirstResponder=field
         if alert.runModal() == .alertFirstButtonReturn {if createTag(name:field.stringValue,color:color,applyTo:file) == nil {status="标签文字不能为空。"}}
     }
     func consumeEscape()->Bool {
+        while let key=conditionOrder.popLast() {
+            if key == "query",!query.isEmpty {rememberSearch(query);query="";search();return true}
+            if key == "scope",scopeTitle != nil {clearScope();return true}
+            if key == "category",category != .all {category = .all;return true}
+            if key.hasPrefix("tag:") {let id=String(key.dropFirst(4));if selectedTagIDs.contains(id) {toggleTagSelection(id);return true}}
+        }
         if !query.isEmpty {rememberSearch(query);query="";search();return true}
         if scopeTitle != nil {clearScope();return true}
-        if tagFilter != nil {tagFilter=nil;return true}
+        if let id=selectedTagIDs.last {toggleTagSelection(id);return true}
+        if category != .all {category = .all;return true}
         return false
     }
     func requestTrash(_ file:FileHit) {
@@ -470,7 +566,8 @@ struct SearchRoot:Codable,Identifiable,Equatable {let url:URL;var kind:SourceKin
             savePreferences();status="已移到废纸篓：\(file.name)"
         } catch {status="无法移到废纸篓：\(error.localizedDescription)"}
     }
+    var didOpenResult:(()->Void)?
     func open(_ file:FileHit) {action(file,reveal:false)}
     func reveal(_ file:FileHit) {action(file,reveal:true)}
-    private func action(_ file:FileHit,reveal:Bool) {rememberSearch(query);Task {let exists=await Task.detached {FileManager.default.fileExists(atPath:file.url.path)}.value;guard exists else {status="文件当前不可用，请检查磁盘或共享盘连接。";return};if reveal {NSWorkspace.shared.activateFileViewerSelecting([file.url])} else if NSWorkspace.shared.open(file.url) {preferences.recentOpened[file.id]=Date();savePreferences();if resultSort == .recent {search()}}}}
+    private func action(_ file:FileHit,reveal:Bool) {rememberSearch(query);Task {let exists=await Task.detached {FileManager.default.fileExists(atPath:file.url.path)}.value;guard exists else {status="文件当前不可用，请检查磁盘或共享盘连接。";return};if reveal {NSWorkspace.shared.activateFileViewerSelecting([file.url]);didOpenResult?()} else if NSWorkspace.shared.open(file.url) {preferences.recentOpened[file.id]=Date();savePreferences();didOpenResult?();if resultSort == .recent {search()}} else {status="无法打开文件，请检查默认打开方式。"}}}
 }

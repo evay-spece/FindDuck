@@ -18,6 +18,7 @@ enum ResultCategory: String, CaseIterable, Identifiable, Sendable {
     }
     static func kind(of file: FileHit) -> ResultCategory {
         if file.isDirectory { return .folders }
+        if WechatLocations.isOpaqueImage(file.url) { return .images }
         switch file.url.pathExtension.lowercased() {
         case "xls", "xlsx", "xlsm", "csv", "tsv", "numbers": return .spreadsheets
         case "ppt", "pptx", "key": return .slides

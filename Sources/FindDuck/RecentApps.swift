@@ -14,14 +14,14 @@ struct RecentAppEntry:Codable,Identifiable,Equatable {
     private let file:URL
     private var observers:[NSObjectProtocol]=[]
     init(file:URL?=nil,watch:Bool=true) {
-        self.file=file ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("com.chenhuang.smbsearch/recent-apps.json")
+        self.file=file ?? BiuStorage.directory.appendingPathComponent("recent-apps.json")
         if let data=try? Data(contentsOf:self.file),let entries=try? JSONDecoder().decode([RecentAppEntry].self,from:data) {
             for entry in entries.sorted(by:{$0.openedAt < $1.openedAt}) where FileManager.default.fileExists(atPath:entry.path) {record(entry,persist:false)}
         }
         if watch {start()}
     }
     func record(_ entry:RecentAppEntry,persist:Bool=true) {
-        guard entry.path.hasPrefix("/"),URL(fileURLWithPath:entry.path).pathExtension.lowercased() == "app",entry.bundleID != "com.chenhuang.smbsearch",!entry.name.isEmpty else {return}
+        guard entry.path.hasPrefix("/"),URL(fileURLWithPath:entry.path).pathExtension.lowercased() == "app",entry.bundleID != BiuStorage.identifier, entry.bundleID != BiuStorage.legacyIdentifier,!entry.name.isEmpty else {return}
         let path=URL(fileURLWithPath:entry.path).standardizedFileURL.path
         guard !items.contains(where:{($0.path == path || (entry.bundleID != nil && $0.bundleID == entry.bundleID)) && $0.openedAt > entry.openedAt}) else {return}
         items.removeAll {$0.path == path || (entry.bundleID != nil && $0.bundleID == entry.bundleID)}

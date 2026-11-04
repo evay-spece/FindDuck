@@ -180,7 +180,7 @@ import Darwin
         XCTAssertEqual(restored.items,home.items);XCTAssertEqual(restored.resumeWindowSeconds,300)
         restored.remove(first);XCTAssertFalse(restored.items.contains {$0.id == first.id})
     }
-    func testHistoryFiveDedupRecallAndQuickFilterPreservesKeyword() async throws {
+    func testHistoryTenDedupRecallAndQuickFilterPreservesKeyword() async throws {
         let base=try fixture(),root=base.appendingPathComponent("files"),wechat=root.appendingPathComponent("wechat"),storage=base.appendingPathComponent("settings")
         try put(wechat.appendingPathComponent("库存.pdf"));try put(wechat.appendingPathComponent("库存.xlsx"));try put(wechat.appendingPathComponent("计划.pdf"))
         try FileManager.default.createDirectory(at:storage,withIntermediateDirectories:true)
@@ -189,9 +189,9 @@ import Darwin
         try JSONEncoder().encode(prefs).write(to:storage.appendingPathComponent("duck-preferences.json"))
         try JSONEncoder().encode([SearchRoot(url:root,kind:.local)]).write(to:storage.appendingPathComponent("sources.json"))
         let library=SearchLibrary(storage:storage);defer {library.shutdown()}
-        for term in ["一","二","三","四","五","六"] {library.rememberSearch(term)}
-        XCTAssertEqual(library.searchHistory,["六","五","四","三","二"])
-        library.rememberSearch("三");XCTAssertEqual(library.searchHistory,["三","六","五","四","二"])
+        for term in ["零","一","二","三","四","五","六","七","八","九","十"] {library.rememberSearch(term)}
+        XCTAssertEqual(library.searchHistory,["十","九","八","七","六","五","四","三","二","一"])
+        library.rememberSearch("三");XCTAssertEqual(library.searchHistory,["三","十","九","八","七","六","五","四","二","一"])
         library.query="库存";library.category = .pdf;library.activateQuick(.wechat)
         let ready=await wait {!library.isSearching && !library.refreshingQuick && library.resultCount == 1};XCTAssertTrue(ready)
         XCTAssertEqual(library.query,"库存");XCTAssertEqual(library.category,.pdf);XCTAssertEqual(library.hits.first?.name,"库存.pdf")
@@ -212,16 +212,54 @@ import Darwin
         let cached=home.appendingPathComponent("known-wechat");try FileManager.default.createDirectory(at:cached,withIntermediateDirectories:true)
         XCTAssertEqual(WechatLocations.locate(home:home,existing:cached)?.path,cached.path)
     }
+    func testWechatIndexOnlyIncludesChatFileAttachments() async throws {
+        let base=try fixture();defer {try? FileManager.default.removeItem(at:base)}
+        let root=base.appendingPathComponent("xwechat_files"),account=root.appendingPathComponent("account")
+        let received=account.appendingPathComponent("msg/file/2026-11/收到报告.pdf")
+        let sent=account.appendingPathComponent("FileStorage/File/已发报告.xlsx")
+        let image=account.appendingPathComponent("msg/attach/chat/2026-11/照片.jpg")
+        let opaque=account.appendingPathComponent("msg/attach/chat/2026-11/1234567890abcdef1234567890abcdef.dat")
+        let video=account.appendingPathComponent("msg/video/2026-11/会议视频.mp4")
+        let cache=account.appendingPathComponent("cache/缓存报告.pdf")
+        let backup=root.appendingPathComponent("old_backup/account/msg/file/备份报告.pdf")
+        for file in [received,sent,image,opaque,video,cache,backup] {try put(file)}
+        let attachments=WechatLocations.attachmentRoots(in:root)
+        XCTAssertEqual(Set(attachments.map(\.standardizedFileURL.path)),Set([received.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path,sent.deletingLastPathComponent().standardizedFileURL.path,image.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path,video.deletingLastPathComponent().deletingLastPathComponent().standardizedFileURL.path]))
+        let storage=base.appendingPathComponent("settings")
+        try FileManager.default.createDirectory(at:storage,withIntermediateDirectories:true)
+        var prefs=DuckPreferences();prefs.developerBlacklist=[];prefs.blacklistDefaultsVersion=3;prefs.suppressNoise=true;prefs.wechatFolder=root
+        var options=LocalIndexOptions();options.indexSystemDirs=true;prefs.localIndexOptions=options
+        try JSONEncoder().encode(prefs).write(to:storage.appendingPathComponent("duck-preferences.json"))
+        try JSONEncoder().encode([SearchRoot(url:root,kind:.local)]).write(to:storage.appendingPathComponent("sources.json"))
+        let library=SearchLibrary(storage:storage);defer {library.shutdown()}
+        let ready=await wait {library.hasIndex && !library.isIndexing};XCTAssertTrue(ready)
+        library.query="报告";library.search()
+        let found=await wait {!library.isSearching && library.resultCount == 2};XCTAssertTrue(found)
+        XCTAssertEqual(Set(library.hits.map(\.name)),Set([received.lastPathComponent,sent.lastPathComponent]))
+        XCTAssertEqual(ResultCategory.kind(of:FileHit(url:image)),.images)
+        library.query="会议视频";library.search()
+        let videoFound=await wait {!library.isSearching && library.hits.contains {$0.url.standardizedFileURL == video.standardizedFileURL}};XCTAssertTrue(videoFound)
+        library.category = .images;library.query="照片";library.search()
+        let imageFound=await wait {!library.isSearching && library.hits.contains {$0.url.standardizedFileURL == image.standardizedFileURL}};XCTAssertTrue(imageFound)
+        XCTAssertTrue(WechatLocations.isOpaqueImage(opaque))
+        XCTAssertEqual(library.sources.count,1)
+    }
     func testTodayScannerBypassesStaleIndexAndSkipsOldWechatTree() async throws {
         let base=try fixture(),root=base.appendingPathComponent("xwechat_files"),files=root.appendingPathComponent("account/msg/file")
         let formatter=DateFormatter();formatter.dateFormat="yyyy-MM";let month=formatter.string(from:Date())
         let fresh=files.appendingPathComponent(month+"/今天微信.xlsx"),direct=files.appendingPathComponent("直接附件.pdf"),old=files.appendingPathComponent("2020-01/旧附件.pdf")
-        try put(fresh);try put(direct);try put(old)
+        let image=root.appendingPathComponent("account/msg/attach/chat/"+month+"/微信照片.jpg")
+        let opaque=root.appendingPathComponent("account/msg/attach/chat/"+month+"/1234567890abcdef1234567890abcdef.dat")
+        let video=root.appendingPathComponent("account/msg/video/"+month+"/微信视频.mp4")
+        try put(fresh);try put(direct);try put(old);try put(image);try put(opaque);try put(video)
         try FileManager.default.setAttributes([.modificationDate:Date(timeIntervalSince1970:1000)],ofItemAtPath:old.deletingLastPathComponent().path)
         var policy=ScanPolicy();policy.fullScanPause = .zero
         let result=try await TodayQuickScanner.scan(quick:.wechat,root:root,policy:policy)
         XCTAssertTrue(result.files.contains {$0.url.standardizedFileURL.path == fresh.standardizedFileURL.path})
         XCTAssertTrue(result.files.contains {$0.url.standardizedFileURL.path == direct.standardizedFileURL.path})
+        XCTAssertTrue(result.files.contains {$0.url.standardizedFileURL.path == image.standardizedFileURL.path})
+        XCTAssertTrue(result.files.contains {$0.url.standardizedFileURL.path == video.standardizedFileURL.path})
+        XCTAssertFalse(result.files.contains {$0.url.standardizedFileURL.path == opaque.standardizedFileURL.path})
         XCTAssertFalse(result.files.contains {$0.url.path.contains("2020-01")})
         XCTAssertTrue(result.files.contains {DuckRules.today($0)})
         let downloads=base.appendingPathComponent("Downloads"),download=downloads.appendingPathComponent("今天下载.pdf");try put(download)
@@ -232,6 +270,13 @@ import Darwin
         let root=URL(fileURLWithPath:"/Volumes/FindDuckSMBFixture"),files=["node_modules/业务报告.pdf","Tool.app/Contents/业务报告.pdf"].map {FileHit(url:root.appendingPathComponent($0))}
         let result=await OilQueryEngine().search(local:[],sharedSnapshot:NameIndex(root:root,created:Date(),files:files,directories:[]),term:"业务报告",category:.pdf,sort:.relevance,preferences:DuckPreferences(),opened:[:],limit:200)
         XCTAssertEqual(result.total,2)
+    }
+    func testLegacyWechatCacheDoesNotLeakFromAnotherIndex() async {
+        let root=URL(fileURLWithPath:"/Users/fixture")
+        let cache=FileHit(url:root.appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data/Library/Application Support/com.tencent.xinWeChat/Message/MessageTemp/截图.rar"))
+        let attachment=FileHit(url:root.appendingPathComponent("Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/account/msg/file/截图.pdf"))
+        let result=await OilQueryEngine().search(local:[],sharedSnapshot:NameIndex(root:root,created:Date(),files:[cache,attachment],directories:[]),term:"截图",category:.all,sort:.relevance,preferences:DuckPreferences(),opened:[:],limit:20)
+        XCTAssertEqual(result.hits.map(\.name),["截图.pdf"])
     }
     func testLibraryDualBlacklistAndLiveSearch() async throws {
         let base=try fixture(),root=base.appendingPathComponent("files"),storage=base.appendingPathComponent("settings")

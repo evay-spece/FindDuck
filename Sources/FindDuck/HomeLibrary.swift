@@ -4,7 +4,7 @@ import Combine
 
 enum HomeKind:String,Codable,Sendable {case application,website,folder,file,action}
 enum HomeAction:String,CaseIterable,Codable,Sendable,Identifiable {
-    case downloads="今天下载的文件",wechat="今天微信接收到的文件",recent="最近打开文件",desktop="桌面",settings="设置"
+    case downloads="今天下载的文件",wechat="今天微信收发的文件",recent="最近打开文件",desktop="桌面",settings="设置"
     var id:String {rawValue}
     var symbol:String {switch self {case .downloads:"arrow.down.circle";case .wechat:"bubble.left.and.bubble.right";case .recent:"clock";case .desktop:"desktopcomputer";case .settings:"gearshape"}}
 }
@@ -22,7 +22,7 @@ struct HomeShortcut:Codable,Identifiable,Equatable,Sendable {
     @Published private(set) var error=""
     private let storage:URL
     init(storage:URL?=nil,seedDefaults:Bool=true) {
-        self.storage=storage ?? FileManager.default.urls(for:.applicationSupportDirectory,in:.userDomainMask)[0].appendingPathComponent("com.chenhuang.smbsearch/home-shortcuts.json")
+        self.storage=storage ?? BiuStorage.directory.appendingPathComponent("home-shortcuts.json")
         if let data=try? Data(contentsOf:self.storage),let settings=try? JSONDecoder().decode(Settings.self,from:data) {items=settings.items;resumeWindowSeconds=settings.resumeWindowSeconds ?? 120}
         else if seedDefaults {
             for (bundle,name) in [("com.apple.finder","访达"),("com.tencent.xinWeChat","微信"),("com.microsoft.Excel","Excel"),("com.microsoft.edgemac","Edge"),("com.apple.Notes","备忘录"),("com.apple.Safari","Safari")] {

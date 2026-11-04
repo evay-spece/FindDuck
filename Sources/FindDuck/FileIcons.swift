@@ -12,6 +12,7 @@ import UniformTypeIdentifiers
     }
     func icon(for file: FileHit) -> NSImage {
         if Date().timeIntervalSince(refreshed) > 60 { cache.removeAllObjects(); refreshed = Date() }
+        if file.url.pathExtension.lowercased() == "app" {return NSWorkspace.shared.icon(forFile:file.url.path)}
         let key = (file.isDirectory ? "folder" : "ext:" + file.url.pathExtension.lowercased()) as NSString
         if let image = cache.object(forKey: key) { return image }
         let image: NSImage

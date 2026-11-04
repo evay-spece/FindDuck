@@ -1,18 +1,20 @@
-# 找鸭 · FindDuck
+# Biu
 
-原生 macOS 文件名搜索工具，支持本地磁盘和已挂载的 SMB 共享盘。名称暂定为找鸭。
+原生 macOS 搜索与启动工具，支持本地磁盘和已挂载的 SMB 共享盘。
 
 [下载最新版](https://github.com/evay-spece/FindDuck/releases/latest) · [更新说明](CHANGELOG.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
 
 ## 下载安装
 
-1. 在 Releases 下载 `FindDuck-1.2.8-macOS-arm64.zip`。
-2. 解压后把“找鸭 1.2.8.app”拖入“应用程序”文件夹，可自行改名为“找鸭.app”。
+1. 在 Releases 下载 `Biu-1.4.34-macOS-arm64.zip`。
+2. 解压后把 Biu.app 拖入“应用程序”文件夹。
 3. 打开后在设置中选择搜索位置并完成所需的磁盘授权。共享盘先用 Finder 连接，再添加已挂载目录。
 
 此版本支持 **Apple Silicon（M 系列芯片）、macOS 14 或更新版本**。Intel 版本尚未提供。
 
-发布包使用 Apple Development 开发签名，**尚未经过 Apple 公证**；其他 Mac 可能被 Gatekeeper 阻止打开，不是已公证的正式分发包。不要关闭系统整体安全保护。
+发布包使用 ad-hoc 签名，**尚未经过 Apple 公证**；其他 Mac 可能被 Gatekeeper 阻止打开，不是已公证的正式分发包。不要关闭系统整体安全保护。
+
+从旧版升级前，先退出旧应用。Biu 首次启动会迁移已有索引和偏好设置，并保留旧数据。应用标识改为 `com.rocketduck.app` 后，可能需要在 macOS 系统设置里重新授予完整磁盘访问权限和辅助功能权限。
 
 ## 主要功能
 
@@ -33,7 +35,7 @@
 
 | 操作 | 快捷键 |
 | --- | --- |
-| 全局呼出 | Control + Space，可在设置修改 |
+| 全局呼出 | 在设置中配置，可设置两组搜索快捷键 |
 | 打开文件 | 回车或双击 |
 | 显示所在文件夹 | Command + 回车或 Command + 双击 |
 | 快速预览 | 点击/上下键选中后按空格 |
@@ -45,11 +47,11 @@
 
 ## 使用边界
 
-- 搜索的是文件名、路径及找鸭标签/备注，不是文件正文全文检索。
+- 搜索的是文件名、路径及Biu标签/备注，不是文件正文全文检索。
 - 本地系统文件、隐藏目录及无权限内容不保证覆盖；可以在设置调整搜索位置和排除项。
 - 微信/下载入口点击会补查目录；最近打开结合本机已记录的使用信息。
 - SMB 的其他客户端变化可能延迟收录，不能保证每个瞬间与服务器完全一致；真实网络大目录与共享盘废纸篓仍需进一步验证。
-- 标签和备注属于找鸭，不修改 Finder 标签。废纸篓不受支持时提示失败，不回退为永久删除。
+- 标签和备注属于Biu，不修改 Finder 标签。废纸篓不受支持时提示失败，不回退为永久删除。
 - 汇率功能按点击连接 Frankfurter，显示来源及日期，为每日参考值，不是实时银行成交价。
 - 深色外观尚未完成实机验收。
 
@@ -59,13 +61,12 @@
 
 ```sh
 DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer xcrun swift test -c release --filter FindDuckCoreTests
-python3 build.py 'build/找鸭.app'
+python3 build.py 'build/Biu.app'
 ```
 
 目标路径必须不存在。默认使用 ad-hoc 签名；要使用自己的证书，请先设置 `FINDDUCK_SIGN_IDENTITY` 环境变量。此脚本不会读取或提供任何私钥。
 
-1.2.8 构建号为53。39项核心测试通过；两行金额换算、最近App记录与展开、窄窗搜索布局已实机检查；主页拖动让位与取消已获用户确认。实际Dock通知数字、外部拖入、独立F键跨应用、深色外观与真实SMB网络仍未完成完整实机验收。
 
 ## Oil Find 归属
 
-本地核心来自 [Oil Find](https://github.com/oil-oil/oil-find)，保留其 MIT 许可及来源记录，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。找鸭有独立的数据目录，不依赖安装原 Oil Find 应用。
+本地核心来自 [Oil Find](https://github.com/oil-oil/oil-find)，保留其 MIT 许可及来源记录，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。Biu有独立的数据目录，不依赖安装原 Oil Find 应用。

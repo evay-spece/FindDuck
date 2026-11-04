@@ -27,9 +27,9 @@ enum DuckMenuBarIcon {
                 break
             }
         }
-        guard !image.representations.isEmpty else { return NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "找鸭") }
+        guard !image.representations.isEmpty else { return NSImage(systemSymbolName: "magnifyingglass", accessibilityDescription: "Biu") }
         image.isTemplate = true
-        image.accessibilityDescription = "找鸭"
+        image.accessibilityDescription = "Biu"
         return image
     }
     private static func trimmed(_ source: CGImage) -> CGImage? {

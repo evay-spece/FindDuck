@@ -1,0 +1,12 @@
+{
+  "fill": { "solid": "extended-srgb:0.02745,0.32941,0.91765,1.00000" },
+  "groups": [
+    {
+      "layers": [
+        { "name": "Rocket Duck", "image-name": "RocketDuckPorthole.png", "glass": false }
+      ],
+      "specular": false
+    }
+  ],
+  "supported-platforms": { "squares": ["macOS"] }
+}
