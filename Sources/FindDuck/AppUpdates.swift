@@ -22,7 +22,7 @@ struct AppRelease: Decodable {
     }
 
     var page: URL {
-        URL(string: "https://github.com/evay-spece/FindDuck/releases/tag")!.appendingPathComponent(tag_name)
+        URL(string: "https://github.com/evay-spece/biu/releases/tag")!.appendingPathComponent(tag_name)
     }
 }
 
@@ -34,7 +34,7 @@ struct AppRelease: Decodable {
 
     private let current = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
     private let notifiedKey = "siuLastUpdatePopupVersion"
-    private let endpoint = URL(string: "https://api.github.com/repos/evay-spece/FindDuck/releases/latest")!
+    private let endpoint = URL(string: "https://api.github.com/repos/evay-spece/biu/releases/latest")!
     private var wantsStatus = false
     var hasSmallUpdate: Bool { release?.updateLevel(comparedTo: current) == 2 }
 

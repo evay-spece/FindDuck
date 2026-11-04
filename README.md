@@ -2,7 +2,7 @@
 
 原生 macOS 搜索与启动工具，支持本地磁盘和已挂载的 SMB 共享盘。
 
-[下载最新版](https://github.com/evay-spece/FindDuck/releases/latest) · [更新说明](CHANGELOG.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
+[下载最新版](https://github.com/evay-spece/biu/releases/latest) · [更新说明](CHANGELOG.md) · [第三方许可](THIRD_PARTY_NOTICES.md)
 
 ## 下载安装
 
